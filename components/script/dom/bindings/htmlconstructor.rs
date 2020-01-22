@@ -72,16 +72,17 @@ use crate::dom::bindings::conversions::DerivedFrom;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::create::create_native_html_element;
-use crate::dom::customelementregistry::ConstructionStackEntry;
-use crate::dom::element::{CustomElementState, Element, ElementCreator};
+use crate::dom::customelementregistry::{ConstructionStackEntry, CustomElementState};
+use crate::dom::element::{Element, ElementCreator};
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::window::Window;
+use crate::script_runtime::JSContext;
 use crate::script_thread::ScriptThread;
 use html5ever::interface::QualName;
 use html5ever::LocalName;
-use js::glue::UnwrapObject;
+use js::glue::UnwrapObjectStatic;
 use js::jsapi::{CallArgs, CurrentGlobalOrNull};
-use js::jsapi::{JSAutoCompartment, JSContext, JSObject};
+use js::jsapi::{JSAutoRealm, JSObject};
 use js::rust::HandleObject;
 use js::rust::MutableHandleObject;
 use std::ptr;
@@ -99,7 +100,7 @@ where
     // Step 2 is checked in the generated caller code
 
     // Step 3
-    rooted!(in(window.get_cx()) let new_target = call_args.new_target().to_object());
+    rooted!(in(*window.get_cx()) let new_target = call_args.new_target().to_object());
     let definition = match registry.lookup_definition_by_constructor(new_target.handle()) {
         Some(definition) => definition,
         None => {
@@ -109,15 +110,15 @@ where
         },
     };
 
-    rooted!(in(window.get_cx()) let callee = UnwrapObject(call_args.callee(), 1));
+    rooted!(in(*window.get_cx()) let callee = UnwrapObjectStatic(call_args.callee()));
     if callee.is_null() {
         return Err(Error::Security);
     }
 
     {
-        let _ac = JSAutoCompartment::new(window.get_cx(), callee.get());
-        rooted!(in(window.get_cx()) let mut constructor = ptr::null_mut::<JSObject>());
-        rooted!(in(window.get_cx()) let global_object = CurrentGlobalOrNull(window.get_cx()));
+        let _ac = JSAutoRealm::new(*window.get_cx(), callee.get());
+        rooted!(in(*window.get_cx()) let mut constructor = ptr::null_mut::<JSObject>());
+        rooted!(in(*window.get_cx()) let global_object = CurrentGlobalOrNull(*window.get_cx()));
 
         if definition.is_autonomous() {
             // Step 4
@@ -182,7 +183,12 @@ where
             DomRoot::downcast(element).ok_or(Error::InvalidState)
         },
         // Step 10
-        Some(ConstructionStackEntry::AlreadyConstructedMarker) => Err(Error::InvalidState),
+        Some(ConstructionStackEntry::AlreadyConstructedMarker) => {
+            let s = "Top of construction stack marked AlreadyConstructed due to \
+                     a custom element constructor constructing itself after super()"
+                .to_string();
+            Err(Error::Type(s))
+        },
     }
 }
 
@@ -190,13 +196,13 @@ where
 /// This list should only include elements marked with the [HTMLConstructor] extended attribute.
 pub fn get_constructor_object_from_local_name(
     name: LocalName,
-    cx: *mut JSContext,
+    cx: JSContext,
     global: HandleObject,
     rval: MutableHandleObject,
 ) -> bool {
     macro_rules! get_constructor(
         ($binding:ident) => ({
-            unsafe { $binding::GetConstructorObject(cx, global, rval); }
+            $binding::GetConstructorObject(cx, global, rval);
             true
         })
     );

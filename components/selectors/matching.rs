@@ -8,6 +8,7 @@ use crate::nth_index_cache::NthIndexCacheInner;
 use crate::parser::{AncestorHashes, Combinator, Component, LocalName};
 use crate::parser::{NonTSPseudoClass, Selector, SelectorImpl, SelectorIter, SelectorList};
 use crate::tree::Element;
+use smallvec::SmallVec;
 use std::borrow::Borrow;
 use std::iter;
 
@@ -331,11 +332,9 @@ where
             return false;
         }
 
-        // Advance to the non-pseudo-element part of the selector, but let the
-        // context note that .
-        if iter.next_sequence().is_none() {
-            return true;
-        }
+        // Advance to the non-pseudo-element part of the selector.
+        let next_sequence = iter.next_sequence().unwrap();
+        debug_assert_eq!(next_sequence, Combinator::PseudoElement);
     }
 
     let result =
@@ -450,11 +449,8 @@ where
 
             element.containing_shadow_host()
         },
+        Combinator::Part => element.containing_shadow_host(),
         Combinator::SlotAssignment => {
-            debug_assert!(
-                context.current_host.is_some(),
-                "Should not be trying to match slotted rules in a non-shadow-tree context"
-            );
             debug_assert!(element
                 .assigned_slot()
                 .map_or(true, |s| s.is_html_slot_element()));
@@ -517,6 +513,7 @@ where
         Combinator::Child |
         Combinator::Descendant |
         Combinator::SlotAssignment |
+        Combinator::Part |
         Combinator::PseudoElement => SelectorMatchingResult::NotMatchedGlobally,
     };
 
@@ -600,7 +597,7 @@ where
         &local_name.lower_name,
     )
     .borrow();
-    element.local_name() == name
+    element.has_local_name(name)
 }
 
 /// Determines whether the given element matches the given compound selector.
@@ -671,10 +668,44 @@ where
 
     match *selector {
         Component::Combinator(_) => unreachable!(),
+        Component::Part(ref parts) => {
+            let mut hosts = SmallVec::<[E; 4]>::new();
+
+            let mut host = match element.containing_shadow_host() {
+                Some(h) => h,
+                None => return false,
+            };
+
+            loop {
+                let outer_host = host.containing_shadow_host();
+                if outer_host.as_ref().map(|h| h.opaque()) == context.shared.current_host {
+                    break;
+                }
+                let outer_host = match outer_host {
+                    Some(h) => h,
+                    None => return false,
+                };
+                // TODO(emilio): if worth it, we could early return if
+                // host doesn't have the exportparts attribute.
+                hosts.push(host);
+                host = outer_host;
+            }
+
+            // Translate the part into the right scope.
+            parts.iter().all(|part| {
+                let mut part = part.clone();
+                for host in hosts.iter().rev() {
+                    part = match host.imported_part(&part) {
+                        Some(p) => p,
+                        None => return false,
+                    };
+                }
+                element.is_part(&part)
+            })
+        },
         Component::Slotted(ref selector) => {
             // <slots> are never flattened tree slottables.
             !element.is_html_slot_element() &&
-                element.assigned_slot().is_some() &&
                 context.shared.nest(|context| {
                     matches_complex_selector(selector.iter(), element, context, flags_setter)
                 })
@@ -685,11 +716,11 @@ where
         Component::LocalName(ref local_name) => matches_local_name(element, local_name),
         Component::ExplicitUniversalType | Component::ExplicitAnyNamespace => true,
         Component::Namespace(_, ref url) | Component::DefaultNamespace(ref url) => {
-            element.namespace() == url.borrow()
+            element.has_namespace(&url.borrow())
         },
         Component::ExplicitNoNamespace => {
             let ns = crate::parser::namespace_empty_string::<E::Impl>();
-            element.namespace() == ns.borrow()
+            element.has_namespace(&ns.borrow())
         },
         Component::ID(ref id) => {
             element.has_id(id, context.shared.classes_and_ids_case_sensitivity())
@@ -902,11 +933,6 @@ where
 }
 
 #[inline]
-fn same_type<E: Element>(a: &E, b: &E) -> bool {
-    a.local_name() == b.local_name() && a.namespace() == b.namespace()
-}
-
-#[inline]
 fn nth_child_index<E>(
     element: &E,
     is_of_type: bool,
@@ -928,7 +954,7 @@ where
             let mut curr = element.clone();
             while let Some(e) = curr.prev_sibling_element() {
                 curr = e;
-                if !is_of_type || same_type(element, &curr) {
+                if !is_of_type || element.is_same_type(&curr) {
                     if let Some(i) = c.lookup(curr.opaque()) {
                         return i - index;
                     }
@@ -949,7 +975,7 @@ where
     };
     while let Some(e) = next(curr) {
         curr = e;
-        if !is_of_type || same_type(element, &curr) {
+        if !is_of_type || element.is_same_type(&curr) {
             // If we're computing indices from the left, check each element in the
             // cache. We handle the indices-from-the-right case at the top of this
             // function.

@@ -3,12 +3,11 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use app_units::Au;
-use euclid::{Point2D, Rect, SideOffsets2D, Size2D, Vector2D};
+use euclid::default::{Point2D, Rect, SideOffsets2D, Size2D, Vector2D};
 use style::computed_values::image_rendering::T as ImageRendering;
 use style::computed_values::mix_blend_mode::T as MixBlendMode;
 use style::computed_values::transform_style::T as TransformStyle;
 use style::values::computed::{BorderStyle, Filter};
-use style::values::generics::effects::Filter as GenericFilter;
 use style::values::specified::border::BorderImageRepeatKeyword;
 use style::values::RGBA;
 use webrender_api as wr;
@@ -40,19 +39,19 @@ impl ToLayout for Filter {
     type Type = wr::FilterOp;
     fn to_layout(&self) -> Self::Type {
         match *self {
-            GenericFilter::Blur(radius) => wr::FilterOp::Blur(radius.px()),
-            GenericFilter::Brightness(amount) => wr::FilterOp::Brightness(amount.0),
-            GenericFilter::Contrast(amount) => wr::FilterOp::Contrast(amount.0),
-            GenericFilter::Grayscale(amount) => wr::FilterOp::Grayscale(amount.0),
-            GenericFilter::HueRotate(angle) => wr::FilterOp::HueRotate(angle.radians()),
-            GenericFilter::Invert(amount) => wr::FilterOp::Invert(amount.0),
-            GenericFilter::Opacity(amount) => wr::FilterOp::Opacity(amount.0.into(), amount.0),
-            GenericFilter::Saturate(amount) => wr::FilterOp::Saturate(amount.0),
-            GenericFilter::Sepia(amount) => wr::FilterOp::Sepia(amount.0),
+            Filter::Blur(radius) => wr::FilterOp::Blur(radius.px()),
+            Filter::Brightness(amount) => wr::FilterOp::Brightness(amount.0),
+            Filter::Contrast(amount) => wr::FilterOp::Contrast(amount.0),
+            Filter::Grayscale(amount) => wr::FilterOp::Grayscale(amount.0),
+            Filter::HueRotate(angle) => wr::FilterOp::HueRotate(angle.radians()),
+            Filter::Invert(amount) => wr::FilterOp::Invert(amount.0),
+            Filter::Opacity(amount) => wr::FilterOp::Opacity(amount.0.into(), amount.0),
+            Filter::Saturate(amount) => wr::FilterOp::Saturate(amount.0),
+            Filter::Sepia(amount) => wr::FilterOp::Sepia(amount.0),
             // Statically check that DropShadow is impossible.
-            GenericFilter::DropShadow(ref shadow) => match *shadow {},
+            Filter::DropShadow(ref shadow) => match *shadow {},
             // Statically check that Url is impossible.
-            GenericFilter::Url(ref url) => match *url {},
+            Filter::Url(ref url) => match *url {},
         }
     }
 }
@@ -115,23 +114,23 @@ impl ToLayout for RGBA {
 }
 
 impl ToLayout for Point2D<Au> {
-    type Type = wr::LayoutPoint;
+    type Type = wr::units::LayoutPoint;
     fn to_layout(&self) -> Self::Type {
-        wr::LayoutPoint::new(self.x.to_f32_px(), self.y.to_f32_px())
+        wr::units::LayoutPoint::new(self.x.to_f32_px(), self.y.to_f32_px())
     }
 }
 
 impl ToLayout for Rect<Au> {
-    type Type = wr::LayoutRect;
+    type Type = wr::units::LayoutRect;
     fn to_layout(&self) -> Self::Type {
-        wr::LayoutRect::new(self.origin.to_layout(), self.size.to_layout())
+        wr::units::LayoutRect::new(self.origin.to_layout(), self.size.to_layout())
     }
 }
 
 impl ToLayout for SideOffsets2D<Au> {
-    type Type = wr::LayoutSideOffsets;
+    type Type = wr::units::LayoutSideOffsets;
     fn to_layout(&self) -> Self::Type {
-        wr::LayoutSideOffsets::new(
+        wr::units::LayoutSideOffsets::new(
             self.top.to_f32_px(),
             self.right.to_f32_px(),
             self.bottom.to_f32_px(),
@@ -141,16 +140,16 @@ impl ToLayout for SideOffsets2D<Au> {
 }
 
 impl ToLayout for Size2D<Au> {
-    type Type = wr::LayoutSize;
+    type Type = wr::units::LayoutSize;
     fn to_layout(&self) -> Self::Type {
-        wr::LayoutSize::new(self.width.to_f32_px(), self.height.to_f32_px())
+        wr::units::LayoutSize::new(self.width.to_f32_px(), self.height.to_f32_px())
     }
 }
 
 impl ToLayout for Vector2D<Au> {
-    type Type = wr::LayoutVector2D;
+    type Type = wr::units::LayoutVector2D;
     fn to_layout(&self) -> Self::Type {
-        wr::LayoutVector2D::new(self.x.to_f32_px(), self.y.to_f32_px())
+        wr::units::LayoutVector2D::new(self.x.to_f32_px(), self.y.to_f32_px())
     }
 }
 

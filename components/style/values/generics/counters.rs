@@ -7,7 +7,7 @@
 #[cfg(feature = "servo")]
 use crate::computed_values::list_style_type::T as ListStyleType;
 #[cfg(feature = "gecko")]
-use crate::values::generics::CounterStyleOrNone;
+use crate::values::generics::CounterStyle;
 #[cfg(feature = "gecko")]
 use crate::values::specified::Attr;
 use crate::values::CustomIdent;
@@ -25,12 +25,14 @@ use std::ops::Deref;
     ToResolvedValue,
     ToShmem,
 )]
-pub struct CounterPair<Integer> {
+#[repr(C)]
+pub struct GenericCounterPair<Integer> {
     /// The name of the counter.
     pub name: CustomIdent,
     /// The value of the counter / increment / etc.
     pub value: Integer,
 }
+pub use self::GenericCounterPair as CounterPair;
 
 /// A generic value for the `counter-increment` property.
 #[derive(
@@ -45,13 +47,15 @@ pub struct CounterPair<Integer> {
     ToResolvedValue,
     ToShmem,
 )]
-pub struct CounterIncrement<I>(Counters<I>);
+#[repr(transparent)]
+pub struct GenericCounterIncrement<I>(pub GenericCounters<I>);
+pub use self::GenericCounterIncrement as CounterIncrement;
 
 impl<I> CounterIncrement<I> {
     /// Returns a new value for `counter-increment`.
     #[inline]
     pub fn new(counters: Vec<CounterPair<I>>) -> Self {
-        CounterIncrement(Counters(counters.into_boxed_slice()))
+        CounterIncrement(Counters(counters.into()))
     }
 }
 
@@ -77,13 +81,15 @@ impl<I> Deref for CounterIncrement<I> {
     ToResolvedValue,
     ToShmem,
 )]
-pub struct CounterSetOrReset<I>(Counters<I>);
+#[repr(transparent)]
+pub struct GenericCounterSetOrReset<I>(pub GenericCounters<I>);
+pub use self::GenericCounterSetOrReset as CounterSetOrReset;
 
 impl<I> CounterSetOrReset<I> {
     /// Returns a new value for `counter-set` / `counter-reset`.
     #[inline]
     pub fn new(counters: Vec<CounterPair<I>>) -> Self {
-        CounterSetOrReset(Counters(counters.into_boxed_slice()))
+        CounterSetOrReset(Counters(counters.into()))
     }
 }
 
@@ -102,6 +108,7 @@ impl<I> Deref for CounterSetOrReset<I> {
 #[derive(
     Clone,
     Debug,
+    Default,
     MallocSizeOf,
     PartialEq,
     SpecifiedValueInfo,
@@ -110,20 +117,17 @@ impl<I> Deref for CounterSetOrReset<I> {
     ToResolvedValue,
     ToShmem,
 )]
-pub struct Counters<I>(#[css(iterable, if_empty = "none")] Box<[CounterPair<I>]>);
-
-impl<I> Default for Counters<I> {
-    #[inline]
-    fn default() -> Self {
-        Counters(vec![].into_boxed_slice())
-    }
-}
+#[repr(transparent)]
+pub struct GenericCounters<I>(
+    #[css(iterable, if_empty = "none")] crate::OwnedSlice<GenericCounterPair<I>>,
+);
+pub use self::GenericCounters as Counters;
 
 #[cfg(feature = "servo")]
 type CounterStyleType = ListStyleType;
 
 #[cfg(feature = "gecko")]
-type CounterStyleType = CounterStyleOrNone;
+type CounterStyleType = CounterStyle;
 
 #[cfg(feature = "servo")]
 #[inline]
@@ -134,7 +138,7 @@ fn is_decimal(counter_type: &CounterStyleType) -> bool {
 #[cfg(feature = "gecko")]
 #[inline]
 fn is_decimal(counter_type: &CounterStyleType) -> bool {
-    *counter_type == CounterStyleOrNone::decimal()
+    *counter_type == CounterStyle::decimal()
 }
 
 /// The specified value for the `content` property.

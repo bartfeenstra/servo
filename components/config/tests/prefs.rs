@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 #[macro_use]
-extern crate serde_derive;
+extern crate serde;
 
 use servo_config::basedir;
 use servo_config::pref_util::Preferences;
@@ -244,7 +244,7 @@ fn test_set_all_error_on_unknown_field() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", feature = "uwp")))]
 #[test]
 fn test_default_config_dir_create_read_write() {
     let json_str = "{\

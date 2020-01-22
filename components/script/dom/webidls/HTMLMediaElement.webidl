@@ -7,7 +7,7 @@
 enum CanPlayTypeResult { "" /* empty string */, "maybe", "probably" };
 typedef (MediaStream /*or MediaSource */ or Blob) MediaProvider;
 
-[Abstract]
+[Exposed=Window, Abstract]
 interface HTMLMediaElement : HTMLElement {
   // error state
   readonly attribute MediaError? error;
@@ -16,7 +16,7 @@ interface HTMLMediaElement : HTMLElement {
   [CEReactions] attribute USVString src;
   attribute MediaProvider? srcObject;
   readonly attribute USVString currentSrc;
-  // [CEReactions] attribute DOMString crossOrigin;
+  [CEReactions] attribute DOMString? crossOrigin;
   const unsigned short NETWORK_EMPTY = 0;
   const unsigned short NETWORK_IDLE = 1;
   const unsigned short NETWORK_LOADING = 2;
@@ -48,12 +48,12 @@ interface HTMLMediaElement : HTMLElement {
   // readonly attribute TimeRanges seekable;
   readonly attribute boolean ended;
   [CEReactions] attribute boolean autoplay;
-  // [CEReactions] attribute boolean loop;
+  [CEReactions] attribute boolean loop;
   Promise<void> play();
   void pause();
 
   // controls
-  // [CEReactions] attribute boolean controls;
+  [CEReactions] attribute boolean controls;
   [Throws] attribute double volume;
   attribute boolean muted;
   [CEReactions] attribute boolean defaultMuted;

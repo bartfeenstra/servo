@@ -26,7 +26,7 @@ impl HangMonitorRegister {
     pub fn init(
         constellation_chan: IpcSender<HangMonitorAlert>,
         control_port: IpcReceiver<SamplerControlMsg>,
-    ) -> Box<BackgroundHangMonitorRegister> {
+    ) -> Box<dyn BackgroundHangMonitorRegister> {
         let (sender, port) = unbounded();
         let _ = thread::Builder::new().spawn(move || {
             let mut monitor =
@@ -48,10 +48,13 @@ impl BackgroundHangMonitorRegister for HangMonitorRegister {
         component_id: MonitoredComponentId,
         transient_hang_timeout: Duration,
         permanent_hang_timeout: Duration,
-    ) -> Box<BackgroundHangMonitor> {
+    ) -> Box<dyn BackgroundHangMonitor> {
         let bhm_chan = BackgroundHangMonitorChan::new(self.sender.clone(), component_id);
 
-        #[cfg(target_os = "windows")]
+        #[cfg(all(
+            target_os = "windows",
+            any(target_arch = "x86_64", target_arch = "x86")
+        ))]
         let sampler = crate::sampler_windows::WindowsSampler::new();
         #[cfg(target_os = "macos")]
         let sampler = crate::sampler_mac::MacOsSampler::new();
@@ -74,7 +77,7 @@ impl BackgroundHangMonitorRegister for HangMonitorRegister {
 }
 
 impl BackgroundHangMonitorClone for HangMonitorRegister {
-    fn clone_box(&self) -> Box<BackgroundHangMonitorRegister> {
+    fn clone_box(&self) -> Box<dyn BackgroundHangMonitorRegister> {
         Box::new(self.clone())
     }
 }
@@ -82,7 +85,7 @@ impl BackgroundHangMonitorClone for HangMonitorRegister {
 /// Messages sent from monitored components to the monitor.
 pub enum MonitoredComponentMsg {
     /// Register component for monitoring,
-    Register(Box<Sampler>, Option<String>, Duration, Duration),
+    Register(Box<dyn Sampler>, Option<String>, Duration, Duration),
     /// Unregister component for monitoring.
     Unregister,
     /// Notify start of new activity for a given component,
@@ -139,7 +142,7 @@ impl BackgroundHangMonitor for BackgroundHangMonitorChan {
 }
 
 struct MonitoredComponent {
-    sampler: Box<Sampler>,
+    sampler: Box<dyn Sampler>,
     last_activity: Instant,
     last_annotation: Option<HangAnnotation>,
     transient_hang_timeout: Duration,

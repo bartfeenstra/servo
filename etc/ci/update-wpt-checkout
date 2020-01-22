@@ -10,6 +10,8 @@ set -o pipefail
 
 REMOTE_NAME=sync-fork
 LOG_FILE=test-wpt.log
+BLUETOOTH_LOG_FILE=test-wpt-bluetooth.log
+WDSPEC_LOG_FILE=test-wpt-wdspec.log
 CURRENT_DATE=$(date +"%d-%m-%Y")
 BRANCH_NAME="wpt_update"
 REMOTE_BRANCH_NAME="wpt_update_${CURRENT_DATE}"
@@ -46,8 +48,11 @@ function unsafe_pull_from_upstream() {
     # Update the manifest again to reach a fixed state (https://github.com/servo/servo/issues/22275).
     ./mach update-manifest || return 4
 
+    # Clean up any now-unused test results.
+    (python3 etc/unused_wpt_results.py | xargs rm -rfv) || return 5
+
     # Amend the existing commit with the new changes from updating the manifest.
-    git commit -a --amend --no-edit || return 5
+    git commit -a --amend --no-edit || return 6
 }
 
 # Remove all local traces of this sync operation.
@@ -62,14 +67,22 @@ function cleanup() {
 # Build Servo and run the full WPT testsuite, saving the results to a log file.
 function unsafe_run_tests() {
     # Run the full testsuite and record the new test results.
-    ./mach test-wpt --release --processes 6 --log-raw "${1}" \
+    ./mach test-wpt --release --processes 12 --log-raw "${1}" \
            --always-succeed || return 1
+
+    # Run the bluetooth testsuite, which uses the webdriver test harness.
+    ./mach test-wpt --release --product=servodriver --headless \
+           --log-raw "${2}" /bluetooth --always-succeed || return 2
+
+    # Run the wdspec testsuite
+    ./mach test-wpt --release --timeout-multiplier=4 --log-raw "${3}" /webdriver \
+           --always-succeed || return 3
 }
 
 # Using an existing log file, update the expected test results and amend the
 # last commit with the new results.
 function unsafe_update_metadata() {
-    ./mach update-wpt "${1}" || return 1
+    ./mach update-wpt "${1}" "${2}" "${3}" || return 1
     # Ensure any new directories or ini files are included in these changes.
     git add tests/wpt/metadata tests/wpt/mozilla/meta || return 2
     # Merge all changes with the existing commit.
@@ -86,6 +99,11 @@ function unsafe_open_pull_request() {
     # is unnecessary.
     git checkout "${BRANCH_NAME}" || return 0
 
+    if [[ -z "${WPT_SYNC_TOKEN+set}" && "${TASKCLUSTER_PROXY_URL+set}" == "set" ]]; then
+        SECRET_RESPONSE=$(curl ${TASKCLUSTER_PROXY_URL}/api/secrets/v1/secret/project/servo/wpt-sync)
+        WPT_SYNC_TOKEN=`echo "${SECRET_RESPONSE}" | jq --raw-output '.secret.token'`
+    fi
+
     if [[ -z "${WPT_SYNC_TOKEN+set}" ]]; then
         echo "Github auth token missing from WPT_SYNC_TOKEN."
         return 1
@@ -100,7 +118,8 @@ function unsafe_open_pull_request() {
     # Prepare the pull request metadata.
     BODY="Automated downstream sync of changes from upstream as of "
     BODY+="${CURRENT_DATE}.\n"
-    BODY+="[no-wpt-sync]"
+    BODY+="[no-wpt-sync]\n"
+    BODY+="r? @servo-wpt-sync\n"
     cat <<EOF >prdata.json || return 4
 {
   "title": "Sync WPT with upstream (${CURRENT_DATE})",
@@ -129,11 +148,11 @@ function pull_from_upstream() {
 }
 
 function run_tests() {
-    unsafe_run_tests "${1}" || { code="${?}"; cleanup; return "${code}"; }
+    unsafe_run_tests "${1}" "${2}" "${3}" || { code="${?}"; cleanup; return "${code}"; }
 }
 
 function update_metadata() {
-    unsafe_update_metadata "${1}" || { code="${?}"; cleanup; return "${code}"; }
+    unsafe_update_metadata "${1}" "${2}" "${3}" || { code="${?}"; cleanup; return "${code}"; }
 }
 
 function open_pull_request() {
@@ -143,8 +162,8 @@ function open_pull_request() {
 SCRIPT_NAME="${0}"
 
 function update_test_results() {
-    run_tests "${LOG_FILE}"
-    update_metadata "${LOG_FILE}"
+    run_tests "${LOG_FILE}" "${BLUETOOTH_LOG_FILE}" "${WDSPEC_LOG_FILE}"
+    update_metadata "${LOG_FILE}" "${BLUETOOTH_LOG_FILE}" "${WDSPEC_LOG_FILE}"
 }
 
 function fetch_upstream_changes() {

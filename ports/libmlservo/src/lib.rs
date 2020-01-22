@@ -7,29 +7,29 @@ use egl::egl::EGLDisplay;
 use egl::egl::EGLSurface;
 use egl::egl::MakeCurrent;
 use egl::egl::SwapBuffers;
+use libc::{dup2, pipe, read};
 use log::info;
 use log::warn;
-use servo::euclid::TypedScale;
+use rust_webvr::api::MagicLeapVRService;
+use servo::euclid::Scale;
 use servo::keyboard_types::Key;
 use servo::servo_url::ServoUrl;
-use servo::webrender_api::DevicePixel;
-use servo::webrender_api::DevicePoint;
-use servo::webrender_api::LayoutPixel;
-use simpleservo::{
-    self, deinit, gl_glue, Coordinates, EventLoopWaker, HostTrait, InitOptions, MouseButton,
-    ServoGlue, SERVO,
-};
+use servo::webrender_api::units::{DevicePixel, DevicePoint, LayoutPixel};
+use simpleservo::{self, deinit, gl_glue, MouseButton, ServoGlue, SERVO};
+use simpleservo::{Coordinates, EventLoopWaker, HostTrait, InitOptions, VRInitOptions};
 use smallvec::SmallVec;
 use std::cell::Cell;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::io::Write;
 use std::os::raw::c_char;
+use std::os::raw::c_int;
 use std::os::raw::c_void;
 use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
+use webxr::magicleap::MagicLeapDiscovery;
 
 #[repr(u32)]
 pub enum MLLogLevel {
@@ -67,16 +67,17 @@ pub enum MLKeyType {
 }
 
 #[repr(transparent)]
-pub struct MLLogger(extern "C" fn(MLLogLevel, *const c_char));
+#[derive(Clone, Copy)]
+pub struct MLLogger(Option<extern "C" fn(MLLogLevel, *const c_char)>);
 
 #[repr(transparent)]
-pub struct MLHistoryUpdate(extern "C" fn(MLApp, bool, bool));
+pub struct MLHistoryUpdate(Option<extern "C" fn(MLApp, bool, bool)>);
 
 #[repr(transparent)]
-pub struct MLURLUpdate(extern "C" fn(MLApp, *const c_char));
+pub struct MLURLUpdate(Option<extern "C" fn(MLApp, *const c_char)>);
 
 #[repr(transparent)]
-pub struct MLKeyboard(extern "C" fn(MLApp, bool));
+pub struct MLKeyboard(Option<extern "C" fn(MLApp, bool)>);
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -99,22 +100,24 @@ pub unsafe extern "C" fn init_servo(
     ctxt: EGLContext,
     surf: EGLSurface,
     disp: EGLDisplay,
+    landscape: bool,
     app: MLApp,
     logger: MLLogger,
     history_update: MLHistoryUpdate,
     url_update: MLURLUpdate,
     keyboard: MLKeyboard,
     url: *const c_char,
+    default_args: *const c_char,
     width: u32,
     height: u32,
     hidpi: f32,
 ) -> *mut ServoInstance {
+    redirect_stdout_to_log(logger);
     let _ = log::set_boxed_logger(Box::new(logger));
     log::set_max_level(LOG_LEVEL);
 
     let gl = gl_glue::egl::init().expect("EGL initialization failure");
 
-    let url = CStr::from_ptr(url).to_str().unwrap_or("about:blank");
     let coordinates = Coordinates::new(
         0,
         0,
@@ -123,13 +126,55 @@ pub unsafe extern "C" fn init_servo(
         width as i32,
         height as i32,
     );
+
+    let mut url = CStr::from_ptr(url).to_str().unwrap_or("about:blank");
+
+    // If the URL has a space in it, then treat everything before the space as arguments
+    let args = if let Some(i) = url.rfind(' ') {
+        let (front, back) = url.split_at(i);
+        url = back;
+        front.split(' ').map(|s| s.to_owned()).collect()
+    } else if !default_args.is_null() {
+        CStr::from_ptr(default_args)
+            .to_str()
+            .unwrap_or("")
+            .split(' ')
+            .map(|s| s.to_owned())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    info!("got args: {:?}", args);
+
+    let vr_init = if !landscape {
+        let name = String::from("Magic Leap VR Display");
+        let (service, heartbeat) = MagicLeapVRService::new(name, ctxt, gl.gl_wrapper.clone())
+            .expect("Failed to create VR service");
+        let service = Box::new(service);
+        let heartbeat = Box::new(heartbeat);
+        VRInitOptions::VRService(service, heartbeat)
+    } else {
+        VRInitOptions::None
+    };
+
+    let xr_discovery: Option<Box<dyn webxr_api::Discovery>> = if !landscape {
+        let discovery = MagicLeapDiscovery::new(ctxt, gl.gl_wrapper.clone());
+        Some(Box::new(discovery))
+    } else {
+        None
+    };
+
     let opts = InitOptions {
-        args: None,
+        args,
         url: Some(url.to_string()),
         density: hidpi,
         enable_subpixel_text_antialiasing: false,
-        vr_pointer: None,
+        vr_init,
+        xr_discovery,
         coordinates,
+        gl_context_pointer: Some(ctxt),
+        native_display_pointer: Some(disp),
     };
     let wakeup = Box::new(EventLoopWakerInstance);
     let shut_down_complete = Rc::new(Cell::new(false));
@@ -138,17 +183,18 @@ pub unsafe extern "C" fn init_servo(
         ctxt,
         surf,
         disp,
+        landscape,
         shut_down_complete: shut_down_complete.clone(),
         history_update,
         url_update,
         keyboard,
     });
     info!("Starting servo");
-    simpleservo::init(opts, gl, wakeup, callbacks).expect("error initializing Servo");
+    simpleservo::init(opts, gl.gl_wrapper, wakeup, callbacks).expect("error initializing Servo");
 
     let result = Box::new(ServoInstance {
         scroll_state: ScrollState::TriggerUp,
-        scroll_scale: TypedScale::new(SCROLL_SCALE / hidpi),
+        scroll_scale: Scale::new(SCROLL_SCALE / hidpi),
         shut_down_complete,
     });
     Box::into_raw(result)
@@ -194,7 +240,7 @@ pub unsafe extern "C" fn move_servo(servo: *mut ServoInstance, x: f32, y: f32) {
         match servo.scroll_state {
             ScrollState::TriggerUp => {
                 servo.scroll_state = ScrollState::TriggerUp;
-                let _ = call(|s| s.move_mouse(x, y));
+                let _ = call(|s| s.mouse_move(x, y));
             },
             ScrollState::TriggerDown(start)
                 if (start - point).square_length() < DRAG_CUTOFF_SQUARED =>
@@ -203,14 +249,14 @@ pub unsafe extern "C" fn move_servo(servo: *mut ServoInstance, x: f32, y: f32) {
             }
             ScrollState::TriggerDown(start) => {
                 servo.scroll_state = ScrollState::TriggerDragging(start, point);
-                let _ = call(|s| s.move_mouse(x, y));
+                let _ = call(|s| s.mouse_move(x, y));
                 let delta = (point - start) * servo.scroll_scale;
                 let start = start.to_i32();
                 let _ = call(|s| s.scroll_start(delta.x, delta.y, start.x, start.y));
             },
             ScrollState::TriggerDragging(start, prev) => {
                 servo.scroll_state = ScrollState::TriggerDragging(start, point);
-                let _ = call(|s| s.move_mouse(x, y));
+                let _ = call(|s| s.mouse_move(x, y));
                 let delta = (point - prev) * servo.scroll_scale;
                 let start = start.to_i32();
                 let _ = call(|s| s.scroll(delta.x, delta.y, start.x, start.y));
@@ -232,8 +278,8 @@ pub unsafe extern "C" fn trigger_servo(servo: *mut ServoInstance, x: f32, y: f32
             ScrollState::TriggerDown(start) if !down => {
                 servo.scroll_state = ScrollState::TriggerUp;
                 let _ = call(|s| s.mouse_up(start.x, start.y, MouseButton::Left));
-                let _ = call(|s| s.click(start.x, start.y));
-                let _ = call(|s| s.move_mouse(start.x, start.y));
+                let _ = call(|s| s.click(start.x as f32, start.y as f32));
+                let _ = call(|s| s.mouse_move(start.x, start.y));
             },
             ScrollState::TriggerDragging(start, prev) if !down => {
                 servo.scroll_state = ScrollState::TriggerUp;
@@ -299,6 +345,7 @@ struct HostCallbacks {
     ctxt: EGLContext,
     surf: EGLSurface,
     disp: EGLDisplay,
+    landscape: bool,
     shut_down_complete: Rc<Cell<bool>>,
     history_update: MLHistoryUpdate,
     url_update: MLURLUpdate,
@@ -308,24 +355,35 @@ struct HostCallbacks {
 
 impl HostTrait for HostCallbacks {
     fn flush(&self) {
-        SwapBuffers(self.disp, self.surf);
+        // Immersive and landscape apps have different requirements for who calls SwapBuffers.
+        if self.landscape {
+            SwapBuffers(self.disp, self.surf);
+        }
     }
 
     fn make_current(&self) {
         MakeCurrent(self.disp, self.surf, self.surf, self.ctxt);
     }
 
+    fn on_alert(&self, _message: String) {}
     fn on_load_started(&self) {}
     fn on_load_ended(&self) {}
     fn on_title_changed(&self, _title: String) {}
+    fn on_allow_navigation(&self, _url: String) -> bool {
+        true
+    }
     fn on_url_changed(&self, url: String) {
         if let Ok(cstr) = CString::new(url.as_str()) {
-            (self.url_update.0)(self.app, cstr.as_ptr());
+            if let Some(url_update) = self.url_update.0 {
+                url_update(self.app, cstr.as_ptr());
+            }
         }
     }
 
     fn on_history_changed(&self, can_go_back: bool, can_go_forward: bool) {
-        (self.history_update.0)(self.app, can_go_back, can_go_forward);
+        if let Some(history_update) = self.history_update.0 {
+            history_update(self.app, can_go_back, can_go_forward);
+        }
     }
 
     fn on_animating_changed(&self, _animating: bool) {}
@@ -335,13 +393,21 @@ impl HostTrait for HostCallbacks {
     }
 
     fn on_ime_state_changed(&self, show: bool) {
-        (self.keyboard.0)(self.app, show)
+        if let Some(keyboard) = self.keyboard.0 {
+            keyboard(self.app, show)
+        }
     }
+
+    fn get_clipboard_contents(&self) -> Option<String> {
+        None
+    }
+
+    fn set_clipboard_contents(&self, _contents: String) {}
 }
 
 pub struct ServoInstance {
     scroll_state: ScrollState,
-    scroll_scale: TypedScale<f32, DevicePixel, LayoutPixel>,
+    scroll_scale: Scale<f32, DevicePixel, LayoutPixel>,
     shut_down_complete: Rc<Cell<bool>>,
 }
 
@@ -355,7 +421,7 @@ enum ScrollState {
 struct EventLoopWakerInstance;
 
 impl EventLoopWaker for EventLoopWakerInstance {
-    fn clone(&self) -> Box<EventLoopWaker + Send> {
+    fn clone_box(&self) -> Box<dyn EventLoopWaker> {
         Box::new(EventLoopWakerInstance)
     }
 
@@ -368,17 +434,100 @@ impl log::Log for MLLogger {
     }
 
     fn log(&self, record: &log::Record) {
-        let lvl = match record.level() {
-            log::Level::Error => MLLogLevel::Error,
-            log::Level::Warn => MLLogLevel::Warning,
-            log::Level::Info => MLLogLevel::Info,
-            log::Level::Debug => MLLogLevel::Debug,
-            log::Level::Trace => MLLogLevel::Verbose,
-        };
-        let mut msg = SmallVec::<[u8; 128]>::new();
-        write!(msg, "{}\0", record.args()).unwrap();
-        (self.0)(lvl, &msg[0] as *const _ as *const _);
+        if let Some(log) = self.0 {
+            let lvl = match record.level() {
+                log::Level::Error => MLLogLevel::Error,
+                log::Level::Warn => MLLogLevel::Warning,
+                log::Level::Info => MLLogLevel::Info,
+                log::Level::Debug => MLLogLevel::Debug,
+                log::Level::Trace => MLLogLevel::Verbose,
+            };
+            let mut msg = SmallVec::<[u8; 128]>::new();
+            write!(msg, "{}\0", record.args()).unwrap();
+            log(lvl, &msg[0] as *const _ as *const _);
+        }
     }
 
     fn flush(&self) {}
+}
+
+fn redirect_stdout_to_log(logger: MLLogger) {
+    let log = match logger.0 {
+        None => return,
+        Some(log) => log,
+    };
+
+    // The first step is to redirect stdout and stderr to the logs.
+    // We redirect stdout and stderr to a custom descriptor.
+    let mut pfd: [c_int; 2] = [0, 0];
+    unsafe {
+        pipe(pfd.as_mut_ptr());
+        dup2(pfd[1], 1);
+        dup2(pfd[1], 2);
+    }
+
+    let descriptor = pfd[0];
+
+    // Then we spawn a thread whose only job is to read from the other side of the
+    // pipe and redirect to the logs.
+    let _detached = thread::spawn(move || {
+        const BUF_LENGTH: usize = 512;
+        let mut buf = vec![b'\0' as c_char; BUF_LENGTH];
+
+        // Always keep at least one null terminator
+        const BUF_AVAILABLE: usize = BUF_LENGTH - 1;
+        let buf = &mut buf[..BUF_AVAILABLE];
+
+        let mut cursor = 0_usize;
+
+        loop {
+            let result = {
+                let read_into = &mut buf[cursor..];
+                unsafe {
+                    read(
+                        descriptor,
+                        read_into.as_mut_ptr() as *mut _,
+                        read_into.len(),
+                    )
+                }
+            };
+
+            let end = if result == 0 {
+                return;
+            } else if result < 0 {
+                log(
+                    MLLogLevel::Error,
+                    b"error in log thread; closing\0".as_ptr() as *const _,
+                );
+                return;
+            } else {
+                result as usize + cursor
+            };
+
+            // Only modify the portion of the buffer that contains real data.
+            let buf = &mut buf[0..end];
+
+            if let Some(last_newline_pos) = buf.iter().rposition(|&c| c == b'\n' as c_char) {
+                buf[last_newline_pos] = b'\0' as c_char;
+                log(MLLogLevel::Info, buf.as_ptr());
+                if last_newline_pos < buf.len() - 1 {
+                    let pos_after_newline = last_newline_pos + 1;
+                    let len_not_logged_yet = buf[pos_after_newline..].len();
+                    for j in 0..len_not_logged_yet as usize {
+                        buf[j] = buf[pos_after_newline + j];
+                    }
+                    cursor = len_not_logged_yet;
+                } else {
+                    cursor = 0;
+                }
+            } else if end == BUF_AVAILABLE {
+                // No newline found but the buffer is full, flush it anyway.
+                // `buf.as_ptr()` is null-terminated by BUF_LENGTH being 1 less than BUF_AVAILABLE.
+                log(MLLogLevel::Info, buf.as_ptr());
+                cursor = 0;
+            } else {
+                cursor = end;
+            }
+        }
+    });
 }

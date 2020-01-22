@@ -7,9 +7,13 @@ edition = "2018"
 publish = false
 
 [dependencies]
+getopts = "0.2.11"
 libservo = { path = "../../../components/servo" }
 log = "0.4"
-serde_json = "1.0"
+servo-media = { git = "https://github.com/servo/media" }
+
+webxr-api = { git = "https://github.com/servo/webxr", features = ["ipc"] }
+webxr = { git = "https://github.com/servo/webxr"}
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 libc = "0.2"
@@ -24,19 +28,27 @@ winapi = "0.3.2"
 libloading = "0.5"
 
 [build-dependencies]
-gl_generator = "0.10"
+gl_generator = "0.11"
 
 [features]
-default = ["unstable", "default-except-unstable"]
-default-except-unstable = ["webdriver", "max_log_level"]
-max_log_level = ["log/release_max_level_info"]
-webdriver = ["libservo/webdriver"]
-energy-profiling = ["libservo/energy-profiling"]
+canvas2d-azure = ["libservo/canvas2d-azure"]
+canvas2d-raqote = ["libservo/canvas2d-raqote"]
+default = ["webdriver", "max_log_level"]
 debugmozjs = ["libservo/debugmozjs"]
-unstable = ["libservo/unstable"]
+media-dummy = ["libservo/media-dummy"]
+media-gstreamer = ["libservo/media-gstreamer"]
+egl = ["libservo/egl"]
+energy-profiling = ["libservo/energy-profiling"]
 googlevr = ["libservo/googlevr"]
-oculusvr = ["libservo/oculusvr"]
-native-bluetooth = ["libservo/native-bluetooth"]
-webgl_backtrace = ["libservo/webgl_backtrace"]
 js_backtrace = ["libservo/js_backtrace"]
+layout-2013 = ["libservo/layout-2013"]
+layout-2020 = ["libservo/layout-2020"]
+max_log_level = ["log/release_max_level_info"]
+native-bluetooth = ["libservo/native-bluetooth"]
 no_static_freetype = ["libservo/no_static_freetype"]
+no-wgl = ["libservo/no-wgl"]
+oculusvr = ["libservo/oculusvr"]
+refcell_backtrace = ["libservo/refcell_backtrace"]
+webdriver = ["libservo/webdriver"]
+uwp = ["libservo/uwp", "webxr/openxr-api"]
+webgl_backtrace = ["libservo/webgl_backtrace"]

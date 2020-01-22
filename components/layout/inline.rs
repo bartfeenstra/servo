@@ -21,7 +21,7 @@ use crate::text;
 use crate::traversal::PreorderFlowTraversal;
 use crate::ServoArc;
 use app_units::{Au, MIN_AU};
-use euclid::{Point2D, Rect, Size2D};
+use euclid::default::{Point2D, Rect, Size2D};
 use gfx::font::FontMetrics;
 use gfx_traits::print_tree::PrintTree;
 use range::{Range, RangeIndex};
@@ -41,7 +41,7 @@ use style::logical_geometry::{LogicalRect, LogicalSize, WritingMode};
 use style::properties::ComputedValues;
 use style::servo::restyle_damage::ServoRestyleDamage;
 use style::values::computed::box_::VerticalAlign;
-use style::values::generics::box_::VerticalAlign as GenericVerticalAlign;
+use style::values::generics::box_::VerticalAlignKeyword;
 use style::values::specified::text::TextOverflowSide;
 use unicode_bidi as bidi;
 
@@ -1269,13 +1269,13 @@ impl InlineFlow {
         let mut largest_block_size_for_top_fragments = Au(0);
         let mut largest_block_size_for_bottom_fragments = Au(0);
 
-        // We use `VerticalAlign::Baseline` here because `vertical-align` must
+        // We use `VerticalAlign::baseline()` here because `vertical-align` must
         // not apply to the inside of inline blocks.
         update_line_metrics_for_fragment(
             &mut line_metrics,
             &inline_metrics,
             style.get_box().display,
-            GenericVerticalAlign::Baseline,
+            &VerticalAlign::baseline(),
             &mut largest_block_size_for_top_fragments,
             &mut largest_block_size_for_bottom_fragments,
         );
@@ -1296,7 +1296,7 @@ impl InlineFlow {
                     &mut line_metrics,
                     &inline_metrics,
                     node.style.get_box().display,
-                    node.style.get_box().vertical_align,
+                    &node.style.get_box().vertical_align,
                     &mut largest_block_size_for_top_fragments,
                     &mut largest_block_size_for_bottom_fragments,
                 );
@@ -1318,15 +1318,24 @@ impl InlineFlow {
             line_metrics: &mut LineMetrics,
             inline_metrics: &InlineMetrics,
             display_value: Display,
-            vertical_align_value: VerticalAlign,
+            vertical_align_value: &VerticalAlign,
             largest_block_size_for_top_fragments: &mut Au,
             largest_block_size_for_bottom_fragments: &mut Au,
         ) {
+            // FIXME(emilio): This should probably be handled.
+            let vertical_align_value = match vertical_align_value {
+                VerticalAlign::Keyword(kw) => kw,
+                VerticalAlign::Length(..) => {
+                    *line_metrics = line_metrics.new_metrics_for_fragment(inline_metrics);
+                    return;
+                },
+            };
+
             match (display_value, vertical_align_value) {
-                (Display::Inline, GenericVerticalAlign::Top) |
-                (Display::Block, GenericVerticalAlign::Top) |
-                (Display::InlineFlex, GenericVerticalAlign::Top) |
-                (Display::InlineBlock, GenericVerticalAlign::Top)
+                (Display::Inline, VerticalAlignKeyword::Top) |
+                (Display::Block, VerticalAlignKeyword::Top) |
+                (Display::InlineFlex, VerticalAlignKeyword::Top) |
+                (Display::InlineBlock, VerticalAlignKeyword::Top)
                     if inline_metrics.space_above_baseline >= Au(0) =>
                 {
                     *largest_block_size_for_top_fragments = max(
@@ -1334,10 +1343,10 @@ impl InlineFlow {
                         inline_metrics.space_above_baseline + inline_metrics.space_below_baseline,
                     )
                 },
-                (Display::Inline, GenericVerticalAlign::Bottom) |
-                (Display::Block, GenericVerticalAlign::Bottom) |
-                (Display::InlineFlex, GenericVerticalAlign::Bottom) |
-                (Display::InlineBlock, GenericVerticalAlign::Bottom)
+                (Display::Inline, VerticalAlignKeyword::Bottom) |
+                (Display::Block, VerticalAlignKeyword::Bottom) |
+                (Display::InlineFlex, VerticalAlignKeyword::Bottom) |
+                (Display::InlineBlock, VerticalAlignKeyword::Bottom)
                     if inline_metrics.space_below_baseline >= Au(0) =>
                 {
                     *largest_block_size_for_bottom_fragments = max(
@@ -1970,7 +1979,7 @@ impl Flow for InlineFlow {
                         relative_containing_block_mode,
                         CoordinateSystem::Own,
                     )
-                    .translate(&stacking_context_position.to_vector()),
+                    .translate(stacking_context_position.to_vector()),
             )
         }
     }

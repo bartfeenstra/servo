@@ -104,6 +104,9 @@ pub trait LayoutNode: Debug + GetLayoutData + TNode {
     fn traverse_preorder(self) -> TreeIterator<Self> {
         TreeIterator::new(self)
     }
+
+    /// Returns whether the node is connected.
+    fn is_connected(&self) -> bool;
 }
 
 pub struct ReverseChildrenIterator<ConcreteNode>
@@ -167,9 +170,8 @@ pub trait ThreadSafeLayoutNode:
     type ConcreteNode: LayoutNode<ConcreteThreadSafeLayoutNode = Self>;
     type ConcreteElement: TElement;
 
-    type ConcreteThreadSafeLayoutElement: ThreadSafeLayoutElement<
-            ConcreteThreadSafeLayoutNode = Self,
-        > + ::selectors::Element<Impl = SelectorImpl>;
+    type ConcreteThreadSafeLayoutElement: ThreadSafeLayoutElement<ConcreteThreadSafeLayoutNode = Self>
+        + ::selectors::Element<Impl = SelectorImpl>;
     type ChildrenIterator: Iterator<Item = Self> + Sized;
 
     /// Converts self into an `OpaqueNode`.
@@ -219,7 +221,6 @@ pub trait ThreadSafeLayoutNode:
     fn children(&self) -> LayoutIterator<Self::ChildrenIterator>;
 
     /// Returns a ThreadSafeLayoutElement if this is an element, None otherwise.
-    #[inline]
     fn as_element(&self) -> Option<Self::ConcreteThreadSafeLayoutElement>;
 
     #[inline]
@@ -346,14 +347,12 @@ pub trait ThreadSafeLayoutElement:
     /// lazily_compute_pseudo_element_style, which operates on TElement.
     unsafe fn unsafe_get(self) -> Self::ConcreteElement;
 
-    #[inline]
     fn get_attr(&self, namespace: &Namespace, name: &LocalName) -> Option<&str>;
 
     fn get_attr_enum(&self, namespace: &Namespace, name: &LocalName) -> Option<&AttrValue>;
 
     fn style_data(&self) -> AtomicRef<ElementData>;
 
-    #[inline]
     fn get_pseudo_element_type(&self) -> PseudoElementType;
 
     #[inline]
@@ -388,7 +387,7 @@ pub trait ThreadSafeLayoutElement:
 
     #[inline]
     fn get_details_summary_pseudo(&self) -> Option<Self> {
-        if self.local_name() == &local_name!("details") && self.namespace() == &ns!(html) {
+        if self.has_local_name(&local_name!("details")) && self.has_namespace(&ns!(html)) {
             Some(self.with_pseudo(PseudoElementType::DetailsSummary))
         } else {
             None
@@ -397,8 +396,8 @@ pub trait ThreadSafeLayoutElement:
 
     #[inline]
     fn get_details_content_pseudo(&self) -> Option<Self> {
-        if self.local_name() == &local_name!("details") &&
-            self.namespace() == &ns!(html) &&
+        if self.has_local_name(&local_name!("details")) &&
+            self.has_namespace(&ns!(html)) &&
             self.get_attr(&ns!(), &local_name!("open")).is_some()
         {
             Some(self.with_pseudo(PseudoElementType::DetailsContent))
@@ -487,4 +486,6 @@ pub trait ThreadSafeLayoutElement:
                 .clone(),
         }
     }
+
+    fn is_shadow_host(&self) -> bool;
 }

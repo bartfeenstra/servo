@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::InCompartment;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::BluetoothRemoteGATTCharacteristicBinding::BluetoothRemoteGATTCharacteristicMethods;
 use crate::dom::bindings::codegen::Bindings::BluetoothRemoteGATTDescriptorBinding;
@@ -54,13 +55,13 @@ impl BluetoothRemoteGATTDescriptor {
         global: &GlobalScope,
         characteristic: &BluetoothRemoteGATTCharacteristic,
         uuid: DOMString,
-        instanceID: String,
+        instance_id: String,
     ) -> DomRoot<BluetoothRemoteGATTDescriptor> {
         reflect_dom_object(
             Box::new(BluetoothRemoteGATTDescriptor::new_inherited(
                 characteristic,
                 uuid,
-                instanceID,
+                instance_id,
             )),
             global,
             BluetoothRemoteGATTDescriptorBinding::Wrap,
@@ -93,9 +94,8 @@ impl BluetoothRemoteGATTDescriptorMethods for BluetoothRemoteGATTDescriptor {
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattdescriptor-readvalue
-    #[allow(unsafe_code)]
-    fn ReadValue(&self) -> Rc<Promise> {
-        let p = unsafe { Promise::new_in_current_compartment(&self.global()) };
+    fn ReadValue(&self, comp: InCompartment) -> Rc<Promise> {
+        let p = Promise::new_in_current_compartment(&self.global(), comp);
 
         // Step 1.
         if uuid_is_blocklisted(self.uuid.as_ref(), Blocklist::Reads) {
@@ -126,9 +126,8 @@ impl BluetoothRemoteGATTDescriptorMethods for BluetoothRemoteGATTDescriptor {
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattdescriptor-writevalue
-    #[allow(unsafe_code)]
-    fn WriteValue(&self, value: ArrayBufferViewOrArrayBuffer) -> Rc<Promise> {
-        let p = unsafe { Promise::new_in_current_compartment(&self.global()) };
+    fn WriteValue(&self, value: ArrayBufferViewOrArrayBuffer, comp: InCompartment) -> Rc<Promise> {
+        let p = Promise::new_in_current_compartment(&self.global(), comp);
 
         // Step 1.
         if uuid_is_blocklisted(self.uuid.as_ref(), Blocklist::Writes) {

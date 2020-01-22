@@ -6,7 +6,7 @@
  * https://dom.spec.whatwg.org/#interface-node
  */
 
-[Abstract]
+[Exposed=Window, Abstract]
 interface Node : EventTarget {
   const unsigned short ELEMENT_NODE = 1;
   const unsigned short ATTRIBUTE_NODE = 2; // historical
@@ -29,10 +29,13 @@ interface Node : EventTarget {
   readonly attribute USVString baseURI;
 
   [Pure]
+  readonly attribute boolean isConnected;
+
+  [Pure]
   readonly attribute Document? ownerDocument;
 
   [Pure]
-  Node getRootNode();
+  Node getRootNode(optional GetRootNodeOptions options = {});
 
   [Pure]
   readonly attribute Node? parentNode;
@@ -58,7 +61,7 @@ interface Node : EventTarget {
   [CEReactions]
   void normalize();
 
-  [CEReactions]
+  [CEReactions, Throws]
   Node cloneNode(optional boolean deep = false);
   [Pure]
   boolean isEqualNode(Node? node);
@@ -91,4 +94,8 @@ interface Node : EventTarget {
   Node replaceChild(Node node, Node child);
   [CEReactions, Throws]
   Node removeChild(Node child);
+};
+
+dictionary GetRootNodeOptions {
+  boolean composed = false;
 };

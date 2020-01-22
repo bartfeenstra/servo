@@ -50,23 +50,18 @@ pub struct PerformanceResourceTiming {
     request_start: f64,
     response_start: f64,
     response_end: f64,
-    // transfer_size: f64, //size in octets
-    // encoded_body_size: f64, //size in octets
-    // decoded_body_size: f64, //size in octets
+    transfer_size: u64,     //size in octets
+    encoded_body_size: u64, //size in octets
+    decoded_body_size: u64, //size in octets
 }
 
-// TODO(#21254): startTime
-// TODO(#21255): duration
 // TODO(#21269): next_hop
 // TODO(#21264): worker_start
-// TODO(#21256): redirect_start
-// TODO(#21257): redirect_end
 // TODO(#21258): fetch_start
 // TODO(#21259): domain_lookup_start
 // TODO(#21260): domain_lookup_end
 // TODO(#21261): connect_start
 // TODO(#21262): connect_end
-// TODO(#21263): response_end
 impl PerformanceResourceTiming {
     pub fn new_inherited(
         url: ServoUrl,
@@ -74,10 +69,15 @@ impl PerformanceResourceTiming {
         next_hop: Option<DOMString>,
         fetch_start: f64,
     ) -> PerformanceResourceTiming {
+        let entry_type = if initiator_type == InitiatorType::Navigation {
+            DOMString::from("navigation")
+        } else {
+            DOMString::from("resource")
+        };
         PerformanceResourceTiming {
             entry: PerformanceEntry::new_inherited(
                 DOMString::from(url.into_string()),
-                DOMString::from("resource"),
+                entry_type,
                 0.,
                 0.,
             ),
@@ -87,14 +87,17 @@ impl PerformanceResourceTiming {
             redirect_start: 0.,
             redirect_end: 0.,
             fetch_start: fetch_start,
-            domain_lookup_start: 0.,
             domain_lookup_end: 0.,
+            domain_lookup_start: 0.,
             connect_start: 0.,
             connect_end: 0.,
             secure_connection_start: 0.,
             request_start: 0.,
             response_start: 0.,
             response_end: 0.,
+            transfer_size: 0,
+            encoded_body_size: 0,
+            decoded_body_size: 0,
         }
     }
 
@@ -110,23 +113,27 @@ impl PerformanceResourceTiming {
             entry: PerformanceEntry::new_inherited(
                 DOMString::from(url.into_string()),
                 DOMString::from("resource"),
-                0.,
-                0.,
+                resource_timing.start_time as f64,
+                resource_timing.response_end as f64 - resource_timing.start_time as f64,
             ),
             initiator_type: initiator_type,
             next_hop: next_hop,
             worker_start: 0.,
             redirect_start: resource_timing.redirect_start as f64,
-            redirect_end: 0.,
+            redirect_end: resource_timing.redirect_end as f64,
             fetch_start: resource_timing.fetch_start as f64,
-            domain_lookup_start: 0.,
+            domain_lookup_start: resource_timing.domain_lookup_start as f64,
+            //TODO (#21260)
             domain_lookup_end: 0.,
-            connect_start: 0.,
+            connect_start: resource_timing.connect_start as f64,
             connect_end: resource_timing.connect_end as f64,
-            secure_connection_start: 0.,
+            secure_connection_start: resource_timing.secure_connection_start as f64,
             request_start: resource_timing.request_start as f64,
             response_start: resource_timing.response_start as f64,
-            response_end: 0.,
+            response_end: resource_timing.response_end as f64,
+            transfer_size: 0,
+            encoded_body_size: 0,
+            decoded_body_size: 0,
         }
     }
 
@@ -173,9 +180,38 @@ impl PerformanceResourceTimingMethods for PerformanceResourceTiming {
         }
     }
 
+    // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-domainlookupstart
+    fn DomainLookupStart(&self) -> DOMHighResTimeStamp {
+        Finite::wrap(self.domain_lookup_start)
+    }
+
+    // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-domainlookupend
+    fn DomainLookupEnd(&self) -> DOMHighResTimeStamp {
+        Finite::wrap(self.domain_lookup_end)
+    }
+
+    // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-secureconnectionstart
+    fn SecureConnectionStart(&self) -> DOMHighResTimeStamp {
+        Finite::wrap(self.secure_connection_start)
+    }
+
+    // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-transfersize
+    fn TransferSize(&self) -> u64 {
+        self.transfer_size
+    }
+
+    // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-encodedbodysize
+    fn EncodedBodySize(&self) -> u64 {
+        self.encoded_body_size
+    }
+
+    // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-decodedbodysize
+    fn DecodedBodySize(&self) -> u64 {
+        self.decoded_body_size
+    }
+
     // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-requeststart
     fn RequestStart(&self) -> DOMHighResTimeStamp {
-        // TODO
         Finite::wrap(self.request_start)
     }
 
@@ -184,9 +220,13 @@ impl PerformanceResourceTimingMethods for PerformanceResourceTiming {
         Finite::wrap(self.redirect_start)
     }
 
+    // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-redirectend
+    fn RedirectEnd(&self) -> DOMHighResTimeStamp {
+        Finite::wrap(self.redirect_end)
+    }
+
     // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-responsestart
     fn ResponseStart(&self) -> DOMHighResTimeStamp {
-        // TODO
         Finite::wrap(self.response_start)
     }
 
@@ -195,8 +235,18 @@ impl PerformanceResourceTimingMethods for PerformanceResourceTiming {
         Finite::wrap(self.fetch_start)
     }
 
+    // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-connectstart
+    fn ConnectStart(&self) -> DOMHighResTimeStamp {
+        Finite::wrap(self.connect_start)
+    }
+
     // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-connectend
     fn ConnectEnd(&self) -> DOMHighResTimeStamp {
         Finite::wrap(self.connect_end)
+    }
+
+    // https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-responseend
+    fn ResponseEnd(&self) -> DOMHighResTimeStamp {
+        Finite::wrap(self.response_end)
     }
 }

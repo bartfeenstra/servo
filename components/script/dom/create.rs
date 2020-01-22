@@ -5,9 +5,11 @@
 use crate::dom::bindings::error::{report_pending_exception, throw_dom_exception};
 use crate::dom::bindings::reflector::DomObject;
 use crate::dom::bindings::root::DomRoot;
-use crate::dom::customelementregistry::{is_valid_custom_element_name, upgrade_element};
+use crate::dom::customelementregistry::{
+    is_valid_custom_element_name, upgrade_element, CustomElementState,
+};
 use crate::dom::document::Document;
-use crate::dom::element::{CustomElementCreationMode, CustomElementState, Element, ElementCreator};
+use crate::dom::element::{CustomElementCreationMode, Element, ElementCreator};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::htmlareaelement::HTMLAreaElement;
@@ -80,7 +82,7 @@ use crate::dom::htmlvideoelement::HTMLVideoElement;
 use crate::dom::svgsvgelement::SVGSVGElement;
 use crate::script_thread::ScriptThread;
 use html5ever::{LocalName, Prefix, QualName};
-use js::jsapi::JSAutoCompartment;
+use js::jsapi::JSAutoRealm;
 use servo_config::pref;
 
 fn create_svg_element(
@@ -154,12 +156,10 @@ fn create_html_element(
 
                             // Step 6.1.1
                             unsafe {
-                                let _ac = JSAutoCompartment::new(
-                                    cx,
-                                    global.reflector().get_jsobject().get(),
-                                );
+                                let _ac =
+                                    JSAutoRealm::new(*cx, global.reflector().get_jsobject().get());
                                 throw_dom_exception(cx, &global, error);
-                                report_pending_exception(cx, true);
+                                report_pending_exception(*cx, true);
                             }
 
                             // Step 6.1.2
@@ -189,14 +189,21 @@ fn create_html_element(
         }
     }
 
-    // Steps 7.1-7.2
+    // Steps 7.1-7.3
     let result = create_native_html_element(name.clone(), prefix, document, creator);
+    match is {
+        Some(is) => {
+            result.set_is(is);
+            result.set_custom_element_state(CustomElementState::Undefined);
+        },
+        None => {
+            if is_valid_custom_element_name(&*name.local) {
+                result.set_custom_element_state(CustomElementState::Undefined);
+            }
+        },
+    };
 
-    // Step 7.3
-    if is_valid_custom_element_name(&*name.local) || is.is_some() {
-        result.set_custom_element_state(CustomElementState::Undefined);
-    }
-
+    // Step 8
     result
 }
 

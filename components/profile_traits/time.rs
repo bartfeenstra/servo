@@ -46,6 +46,10 @@ pub enum ProfilerMsg {
     ),
     /// Message used to force print the profiling metrics
     Print,
+
+    /// Report a layout query that could not be processed immediately for a particular URL.
+    BlockedLayoutQuery(String),
+
     /// Tells the profiler to shut down.
     Exit(IpcSender<()>),
 }
@@ -104,6 +108,7 @@ pub enum ProfilerCategory {
     ScriptWorkletEvent = 0x7a,
     ScriptPerformanceEvent = 0x7b,
     ScriptHistoryEvent = 0x7c,
+    ScriptPortMessage = 0x7d,
     TimeToFirstPaint = 0x80,
     TimeToFirstContentfulPaint = 0x81,
     TimeToInteractive = 0x82,

@@ -24,7 +24,7 @@ use crate::fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
 use crate::model::MaybeAuto;
 use crate::table::{ColumnComputedInlineSize, ColumnIntrinsicInlineSize};
 use app_units::Au;
-use euclid::Point2D;
+use euclid::default::Point2D;
 use gfx_traits::print_tree::PrintTree;
 use std::cmp::{max, min};
 use std::fmt;
@@ -331,10 +331,6 @@ impl TableWrapperFlow {
 impl Flow for TableWrapperFlow {
     fn class(&self) -> FlowClass {
         FlowClass::TableWrapper
-    }
-
-    fn as_mut_table_wrapper(&mut self) -> &mut TableWrapperFlow {
-        self
     }
 
     fn as_table_wrapper(&self) -> &TableWrapperFlow {

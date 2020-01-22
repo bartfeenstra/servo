@@ -8,9 +8,12 @@ from distutils.spawn import find_executable
 from distutils.version import LooseVersion
 import json
 import os
-import platform
+import distro
 import shutil
 import subprocess
+import six
+import six.moves.urllib as urllib
+from six.moves import input
 from subprocess import PIPE
 from zipfile import BadZipfile
 
@@ -46,7 +49,7 @@ def install_trusty_deps(force):
 
 
 def check_gstreamer_lib():
-    return subprocess.call(["pkg-config", "--atleast-version=1.14", "gstreamer-1.0"],
+    return subprocess.call(["pkg-config", "--atleast-version=1.16", "gstreamer-1.0"],
                            stdout=PIPE, stderr=PIPE) == 0
 
 
@@ -110,11 +113,12 @@ def linux(context, force=False):
     # Please keep these in sync with the packages in README.md
     pkgs_apt = ['git', 'curl', 'autoconf', 'libx11-dev', 'libfreetype6-dev',
                 'libgl1-mesa-dri', 'libglib2.0-dev', 'xorg-dev', 'gperf', 'g++',
-                'build-essential', 'cmake', 'python-pip',
-                'libbz2-dev', 'libosmesa6-dev', 'libxmu6', 'libxmu-dev', 'libglu1-mesa-dev',
+                'build-essential', 'cmake', 'python-pip', "libssl-dev",
+                'libbz2-dev', 'liblzma-dev',
+                'libosmesa6-dev', 'libxmu6', 'libxmu-dev', 'libglu1-mesa-dev',
                 'libgles2-mesa-dev', 'libegl1-mesa-dev', 'libdbus-1-dev', 'libharfbuzz-dev',
-                'ccache', 'clang', 'autoconf2.13', "libunwind-dev"]
-    pkgs_dnf = ['libtool', 'gcc-c++', 'libXi-devel', 'freetype-devel',
+                'ccache', 'clang', 'autoconf2.13', 'libunwind-dev', 'llvm-dev']
+    pkgs_dnf = ['libtool', 'gcc-c++', 'libXi-devel', 'freetype-devel', 'libunwind-devel',
                 'mesa-libGL-devel', 'mesa-libEGL-devel', 'glib2-devel', 'libX11-devel',
                 'libXrandr-devel', 'gperf', 'fontconfig-devel', 'cabextract', 'ttmkfdir',
                 'python2', 'python2-virtualenv', 'python2-pip', 'expat-devel', 'rpm-build',
@@ -123,24 +127,12 @@ def linux(context, force=False):
                 'ccache', 'mesa-libGLU-devel', 'clang', 'clang-libs', 'gstreamer1-devel',
                 'gstreamer1-plugins-base-devel', 'gstreamer1-plugins-bad-free-devel', 'autoconf213']
     if context.distro == "Ubuntu":
-        if context.distro_version == "17.04":
-            pkgs_apt += ["libssl-dev"]
-        elif int(context.distro_version.split(".")[0]) < 17:
-            pkgs_apt += ["libssl-dev"]
-        else:
-            pkgs_apt += ["libssl1.0-dev"]
-
         if context.distro_version == "14.04":
             pkgs_apt += ["python-virtualenv"]
         else:
             pkgs_apt += ["virtualenv"]
             pkgs_apt += ['libgstreamer1.0-dev', 'libgstreamer-plugins-base1.0-dev',
                          'libgstreamer-plugins-bad1.0-dev']
-
-    elif context.distro == "Debian" and context.distro_version == "Sid":
-        pkgs_apt += ["libssl-dev"]
-    else:
-        pkgs_apt += ["libssl1.0-dev"]
 
     installed_something = install_linux_deps(context, pkgs_apt, pkgs_dnf, force)
 
@@ -263,7 +255,7 @@ def salt(context, force=False):
             print('Something went wrong while bootstrapping')
             return retcode
 
-        proceed = raw_input(
+        proceed = input(
             'Proposed changes are above, proceed with bootstrap? [y/N]: '
         )
         if proceed.lower() not in ['y', 'yes']:
@@ -303,7 +295,7 @@ def windows_msvc(context, force=False):
 
     def prepare_file(zip_path, full_spec):
         if not os.path.isfile(zip_path):
-            zip_url = "{}{}.zip".format(deps_url, full_spec)
+            zip_url = "{}{}.zip".format(deps_url, urllib.parse.quote(full_spec))
             download_file(full_spec, zip_url, zip_path)
 
         print("Extracting {}...".format(full_spec), end='')
@@ -352,9 +344,11 @@ LINUX_SPECIFIC_BOOTSTRAPPERS = {
 
 
 def get_linux_distribution():
-    distro, version, _ = platform.linux_distribution()
+    distrib, version, _ = distro.linux_distribution()
+    distrib = six.ensure_str(distrib)
+    version = six.ensure_str(version)
 
-    if distro == 'LinuxMint':
+    if distrib == 'LinuxMint' or distrib == 'Linux Mint':
         if '.' in version:
             major, _ = version.split('.', 1)
         else:
@@ -367,10 +361,10 @@ def get_linux_distribution():
         elif major == '17':
             base_version = '14.04'
         else:
-            raise Exception('unsupported version of %s: %s' % (distro, version))
+            raise Exception('unsupported version of %s: %s' % (distrib, version))
 
-        distro, version = 'Ubuntu', base_version
-    elif distro.lower() == 'elementary':
+        distrib, version = 'Ubuntu', base_version
+    elif distrib.lower() == 'elementary':
         if version == '5.0':
             base_version = '18.04'
         elif version[0:3] == '0.4':
@@ -382,19 +376,21 @@ def get_linux_distribution():
         elif version == '0.1':
             base_version = '10.10'
         else:
-            raise Exception('unsupported version of %s: %s' % (distro, version))
-
-        distro, version = 'Ubuntu', base_version
-    elif distro.lower() not in [
+            raise Exception('unsupported version of %s: %s' % (distrib, version))
+        distrib, version = 'Ubuntu', base_version
+    elif distrib.lower() == 'ubuntu':
+        if version > '19.10':
+            raise Exception('unsupported version of %s: %s' % (distrib, version))
+    # Fixme: we should allow checked/supported versions only
+    elif distrib.lower() not in [
         'centos',
         'centos linux',
-        'debian',
+        'debian gnu/linux',
         'fedora',
-        'ubuntu',
     ]:
-        raise Exception('mach bootstrap does not support %s, please file a bug' % distro)
+        raise Exception('mach bootstrap does not support %s, please file a bug' % distrib)
 
-    return distro, version
+    return distrib, version
 
 
 def bootstrap(context, force=False, specific=None):
@@ -404,9 +400,9 @@ def bootstrap(context, force=False, specific=None):
     if "windows-msvc" in host_triple():
         bootstrapper = windows_msvc
     elif "linux-gnu" in host_triple():
-        distro, version = get_linux_distribution()
+        distrib, version = get_linux_distribution()
 
-        context.distro = distro
+        context.distro = distrib
         context.distro_version = version
         bootstrapper = LINUX_SPECIFIC_BOOTSTRAPPERS.get(specific, linux)
 

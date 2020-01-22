@@ -6,11 +6,11 @@ use crate::dom::bindings::codegen::Bindings::WorkerLocationBinding;
 use crate::dom::bindings::codegen::Bindings::WorkerLocationBinding::WorkerLocationMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::DomRoot;
-use crate::dom::bindings::str::{DOMString, USVString};
+use crate::dom::bindings::str::USVString;
 use crate::dom::urlhelper::UrlHelper;
 use crate::dom::workerglobalscope::WorkerGlobalScope;
 use dom_struct::dom_struct;
-use servo_url::ServoUrl;
+use servo_url::{ImmutableOrigin, ServoUrl};
 
 // https://html.spec.whatwg.org/multipage/#worker-locations
 #[dom_struct]
@@ -33,6 +33,12 @@ impl WorkerLocation {
             global,
             WorkerLocationBinding::Wrap,
         )
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-workerlocation-origin
+    #[allow(dead_code)]
+    pub fn origin(&self) -> ImmutableOrigin {
+        self.url.origin()
     }
 }
 
@@ -57,6 +63,11 @@ impl WorkerLocationMethods for WorkerLocation {
         UrlHelper::Href(&self.url)
     }
 
+    // https://html.spec.whatwg.org/multipage/#dom-workerlocation-origin
+    fn Origin(&self) -> USVString {
+        UrlHelper::Origin(&self.url)
+    }
+
     // https://html.spec.whatwg.org/multipage/#dom-workerlocation-pathname
     fn Pathname(&self) -> USVString {
         UrlHelper::Pathname(&self.url)
@@ -75,10 +86,5 @@ impl WorkerLocationMethods for WorkerLocation {
     // https://html.spec.whatwg.org/multipage/#dom-workerlocation-search
     fn Search(&self) -> USVString {
         UrlHelper::Search(&self.url)
-    }
-
-    // https://html.spec.whatwg.org/multipage/#dom-workerlocation-href
-    fn Stringifier(&self) -> DOMString {
-        DOMString::from(self.Href().0)
     }
 }

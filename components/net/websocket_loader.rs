@@ -2,21 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::connector::create_ssl_connector_builder;
+use crate::connector::{create_tls_config, ALPN_H1};
 use crate::cookie::Cookie;
 use crate::fetch::methods::should_be_blocked_due_to_bad_port;
 use crate::hosts::replace_host;
 use crate::http_loader::HttpState;
 use embedder_traits::resources::{self, Resource};
-use headers_ext::Host;
+use headers::Host;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use http::uri::Authority;
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
+use ipc_channel::router::ROUTER;
 use net_traits::request::{RequestBuilder, RequestMode};
 use net_traits::{CookieSource, MessageData};
 use net_traits::{WebSocketDomAction, WebSocketNetworkEvent};
 use openssl::ssl::SslStream;
-use servo_config::opts;
 use servo_url::ServoUrl;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,6 +40,7 @@ struct Client<'a> {
     resource_url: &'a ServoUrl,
     event_sender: &'a IpcSender<WebSocketNetworkEvent>,
     protocol_in_use: Option<String>,
+    certificate_path: Option<String>,
 }
 
 impl<'a> Factory for Client<'a> {
@@ -99,6 +100,12 @@ impl<'a> Handler for Client<'a> {
             }
         }
 
+        self.http_state
+            .hsts_list
+            .write()
+            .unwrap()
+            .update_hsts_list_from_response(self.resource_url, &headers);
+
         let _ = self
             .event_sender
             .send(WebSocketNetworkEvent::ConnectionEstablished {
@@ -153,7 +160,7 @@ impl<'a> Handler for Client<'a> {
         stream: TcpStream,
         url: &Url,
     ) -> WebSocketResult<SslStream<TcpStream>> {
-        let certs = match opts::get().certificate_path {
+        let certs = match self.certificate_path {
             Some(ref path) => fs::read_to_string(path).expect("Couldn't not find certificate file"),
             None => resources::read_string(Resource::SSLCertificates),
         };
@@ -166,8 +173,9 @@ impl<'a> Handler for Client<'a> {
                 WebSocketErrorKind::Protocol,
                 format!("Unable to parse domain from {}. Needed for SSL.", url),
             ))?;
-        let connector = create_ssl_connector_builder(&certs).build();
-        connector
+        let tls_config = create_tls_config(&certs, ALPN_H1);
+        tls_config
+            .build()
             .connect(domain, stream)
             .map_err(WebSocketError::from)
     }
@@ -178,16 +186,28 @@ pub fn init(
     resource_event_sender: IpcSender<WebSocketNetworkEvent>,
     dom_action_receiver: IpcReceiver<WebSocketDomAction>,
     http_state: Arc<HttpState>,
+    certificate_path: Option<String>,
 ) {
     thread::Builder::new()
         .name(format!("WebSocket connection to {}", req_builder.url))
         .spawn(move || {
+            let mut req_builder = req_builder;
             let protocols = match req_builder.mode {
                 RequestMode::WebSocket { protocols } => protocols,
                 _ => panic!(
                     "Received a RequestBuilder with a non-websocket mode in websocket_loader"
                 ),
             };
+
+            // https://fetch.spec.whatwg.org/#websocket-opening-handshake
+            // By standard, we should work with an http(s):// URL (req_url),
+            // but as ws-rs expects to be called with a ws(s):// URL (net_url)
+            // we upgrade ws to wss, so we don't have to convert http(s) back to ws(s).
+            http_state
+                .hsts_list
+                .read()
+                .unwrap()
+                .apply_hsts_rules(&mut req_builder.url);
 
             let scheme = req_builder.url.scheme();
             let mut req_url = req_builder.url.clone();
@@ -229,6 +249,7 @@ pub fn init(
                 resource_url: &req_builder.url,
                 event_sender: &resource_event_sender,
                 protocol_in_use: None,
+                certificate_path,
             };
             let mut ws = WebSocket::new(client).unwrap();
 
@@ -240,8 +261,10 @@ pub fn init(
             let ws_sender = ws.broadcaster();
             let initiated_close = Arc::new(AtomicBool::new(false));
 
-            thread::spawn(move || {
-                while let Ok(dom_action) = dom_action_receiver.recv() {
+            ROUTER.add_route(
+                dom_action_receiver.to_opaque(),
+                Box::new(move |message| {
+                    let dom_action = message.to().expect("Ws dom_action message to deserialize");
                     match dom_action {
                         WebSocketDomAction::SendMessage(MessageData::Text(data)) => {
                             ws_sender.send(Message::text(data)).unwrap();
@@ -263,8 +286,8 @@ pub fn init(
                             }
                         },
                     }
-                }
-            });
+                }),
+            );
 
             if let Err(e) = ws.run() {
                 debug!("Failed to run WebSocket: {:?}", e);

@@ -5,6 +5,8 @@ def main(request, response):
     """
 
     response.headers.append("Access-Control-Allow-Origin", "*")
+    response.headers.append("Access-Control-Allow-Headers", "*")
+    response.headers.append("Access-Control-Expose-Headers", "*")
 
     if "device-memory" in request.headers:
             response.headers.set("device-memory-received", request.headers.get("device-memory"))
@@ -20,3 +22,5 @@ def main(request, response):
             response.headers.set("ect-received", request.headers.get("ect"))
     if "Sec-CH-Lang" in request.headers:
             response.headers.set("lang-received", request.headers.get("Sec-CH-Lang"))
+    if "sec-ch-ua-mobile" in request.headers:
+        response.headers.set("mobile-received", request.headers.get("sec-ch-ua-mobile"))

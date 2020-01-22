@@ -4,13 +4,15 @@
 
 use crate::ReferrerPolicy;
 use crate::ResourceTimingType;
+use content_security_policy::{self as csp, CspList};
 use http::HeaderMap;
 use hyper::Method;
+use mime::Mime;
 use msg::constellation_msg::PipelineId;
 use servo_url::{ImmutableOrigin, ServoUrl};
 
 /// An [initiator](https://fetch.spec.whatwg.org/#concept-request-initiator)
-#[derive(Clone, Copy, MallocSizeOf, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
 pub enum Initiator {
     None,
     Download,
@@ -20,37 +22,7 @@ pub enum Initiator {
 }
 
 /// A request [destination](https://fetch.spec.whatwg.org/#concept-request-destination)
-#[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
-pub enum Destination {
-    None,
-    Audio,
-    Document,
-    Embed,
-    Font,
-    Image,
-    Manifest,
-    Object,
-    Report,
-    Script,
-    ServiceWorker,
-    SharedWorker,
-    Style,
-    Track,
-    Video,
-    Worker,
-    Xslt,
-}
-
-impl Destination {
-    /// https://fetch.spec.whatwg.org/#request-destination-script-like
-    #[inline]
-    pub fn is_script_like(&self) -> bool {
-        *self == Destination::Script ||
-            *self == Destination::ServiceWorker ||
-            *self == Destination::SharedWorker ||
-            *self == Destination::Worker
-    }
-}
+pub use csp::Destination;
 
 /// A request [origin](https://fetch.spec.whatwg.org/#concept-request-origin)
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
@@ -128,10 +100,18 @@ pub enum Window {
 }
 
 /// [CORS settings attribute](https://html.spec.whatwg.org/multipage/#attr-crossorigin-anonymous)
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum CorsSettings {
     Anonymous,
     UseCredentials,
+}
+
+/// [Parser Metadata](https://fetch.spec.whatwg.org/#concept-request-parser-metadata)
+#[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+pub enum ParserMetadata {
+    Default,
+    ParserInserted,
+    NotParserInserted,
 }
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
@@ -162,13 +142,20 @@ pub struct RequestBuilder {
     pub use_url_credentials: bool,
     pub origin: ImmutableOrigin,
     // XXXManishearth these should be part of the client object
-    pub referrer_url: Option<ServoUrl>,
+    pub referrer: Option<Referrer>,
     pub referrer_policy: Option<ReferrerPolicy>,
     pub pipeline_id: Option<PipelineId>,
     pub redirect_mode: RedirectMode,
     pub integrity_metadata: String,
+    // This is nominally a part of the client's global object.
+    // It is copied here to avoid having to reach across the thread
+    // boundary every time a redirect occurs.
+    #[ignore_malloc_size_of = "Defined in rust-content-security-policy"]
+    pub csp_list: Option<CspList>,
     // to keep track of redirects
     pub url_list: Vec<ServoUrl>,
+    pub parser_metadata: ParserMetadata,
+    pub initiator: Initiator,
 }
 
 impl RequestBuilder {
@@ -188,13 +175,21 @@ impl RequestBuilder {
             credentials_mode: CredentialsMode::Omit,
             use_url_credentials: false,
             origin: ImmutableOrigin::new_opaque(),
-            referrer_url: None,
+            referrer: None,
             referrer_policy: None,
             pipeline_id: None,
             redirect_mode: RedirectMode::Follow,
             integrity_metadata: "".to_owned(),
             url_list: vec![],
+            parser_metadata: ParserMetadata::Default,
+            initiator: Initiator::None,
+            csp_list: None,
         }
+    }
+
+    pub fn initiator(mut self, initiator: Initiator) -> RequestBuilder {
+        self.initiator = initiator;
+        self
     }
 
     pub fn method(mut self, method: Method) -> RequestBuilder {
@@ -217,14 +212,6 @@ impl RequestBuilder {
         self
     }
 
-    pub fn service_workers_mode(
-        mut self,
-        service_workers_mode: ServiceWorkersMode,
-    ) -> RequestBuilder {
-        self.service_workers_mode = service_workers_mode;
-        self
-    }
-
     pub fn destination(mut self, destination: Destination) -> RequestBuilder {
         self.destination = destination;
         self
@@ -237,11 +224,6 @@ impl RequestBuilder {
 
     pub fn mode(mut self, mode: RequestMode) -> RequestBuilder {
         self.mode = mode;
-        self
-    }
-
-    pub fn cache_mode(mut self, cache_mode: CacheMode) -> RequestBuilder {
-        self.cache_mode = cache_mode;
         self
     }
 
@@ -265,8 +247,8 @@ impl RequestBuilder {
         self
     }
 
-    pub fn referrer_url(mut self, referrer_url: Option<ServoUrl>) -> RequestBuilder {
-        self.referrer_url = referrer_url;
+    pub fn referrer(mut self, referrer: Option<Referrer>) -> RequestBuilder {
+        self.referrer = referrer;
         self
     }
 
@@ -290,8 +272,8 @@ impl RequestBuilder {
         self
     }
 
-    pub fn url_list(mut self, url_list: Vec<ServoUrl>) -> RequestBuilder {
-        self.url_list = url_list;
+    pub fn parser_metadata(mut self, parser_metadata: ParserMetadata) -> RequestBuilder {
+        self.parser_metadata = parser_metadata;
         self
     }
 
@@ -301,6 +283,7 @@ impl RequestBuilder {
             Some(Origin::Origin(self.origin)),
             self.pipeline_id,
         );
+        request.initiator = self.initiator;
         request.method = self.method;
         request.headers = self.headers;
         request.unsafe_request = self.unsafe_request;
@@ -313,11 +296,7 @@ impl RequestBuilder {
         request.credentials_mode = self.credentials_mode;
         request.use_url_credentials = self.use_url_credentials;
         request.cache_mode = self.cache_mode;
-        request.referrer = if let Some(url) = self.referrer_url {
-            Referrer::ReferrerUrl(url)
-        } else {
-            Referrer::NoReferrer
-        };
+        request.referrer = self.referrer.unwrap_or(Referrer::Client);
         request.referrer_policy = self.referrer_policy;
         request.redirect_mode = self.redirect_mode;
         let mut url_list = self.url_list;
@@ -327,6 +306,8 @@ impl RequestBuilder {
         request.redirect_count = url_list.len() as u32 - 1;
         request.url_list = url_list;
         request.integrity_metadata = self.integrity_metadata;
+        request.parser_metadata = self.parser_metadata;
+        request.csp_list = self.csp_list;
         request
     }
 }
@@ -392,6 +373,13 @@ pub struct Request {
     pub redirect_count: u32,
     /// <https://fetch.spec.whatwg.org/#concept-request-response-tainting>
     pub response_tainting: ResponseTainting,
+    /// <https://fetch.spec.whatwg.org/#concept-request-parser-metadata>
+    pub parser_metadata: ParserMetadata,
+    // This is nominally a part of the client's global object.
+    // It is copied here to avoid having to reach across the thread
+    // boundary every time a redirect occurs.
+    #[ignore_malloc_size_of = "Defined in rust-content-security-policy"]
+    pub csp_list: Option<CspList>,
 }
 
 impl Request {
@@ -421,8 +409,10 @@ impl Request {
             redirect_mode: RedirectMode::Follow,
             integrity_metadata: String::new(),
             url_list: vec![url],
+            parser_metadata: ParserMetadata::Default,
             redirect_count: 0,
             response_tainting: ResponseTainting::Basic,
+            csp_list: None,
         }
     }
 
@@ -478,5 +468,107 @@ impl Referrer {
             Referrer::NoReferrer | Referrer::Client => None,
             Referrer::ReferrerUrl(ref url) => Some(url),
         }
+    }
+}
+
+// https://fetch.spec.whatwg.org/#cors-unsafe-request-header-byte
+// TODO: values in the control-code range are being quietly stripped out by
+// HeaderMap and never reach this function to be loudly rejected!
+fn is_cors_unsafe_request_header_byte(value: &u8) -> bool {
+    match value {
+        0x00..=0x08 |
+        0x10..=0x19 |
+        0x22 |
+        0x28 |
+        0x29 |
+        0x3A |
+        0x3C |
+        0x3E |
+        0x3F |
+        0x40 |
+        0x5B |
+        0x5C |
+        0x5D |
+        0x7B |
+        0x7D |
+        0x7F => true,
+        _ => false,
+    }
+}
+
+// https://fetch.spec.whatwg.org/#cors-safelisted-request-header
+// subclause `accept`
+fn is_cors_safelisted_request_accept(value: &[u8]) -> bool {
+    !(value.iter().any(is_cors_unsafe_request_header_byte))
+}
+
+// https://fetch.spec.whatwg.org/#cors-safelisted-request-header
+// subclauses `accept-language`, `content-language`
+fn is_cors_safelisted_language(value: &[u8]) -> bool {
+    value.iter().all(|&x| match x {
+        0x30..=0x39 |
+        0x41..=0x5A |
+        0x61..=0x7A |
+        0x20 |
+        0x2A |
+        0x2C |
+        0x2D |
+        0x2E |
+        0x3B |
+        0x3D => true,
+        _ => false,
+    })
+}
+
+// https://fetch.spec.whatwg.org/#cors-safelisted-request-header
+// subclause `content-type`
+fn is_cors_safelisted_request_content_type(value: &[u8]) -> bool {
+    // step 1
+    if value.iter().any(is_cors_unsafe_request_header_byte) {
+        return false;
+    }
+    // step 2
+    let value_string = if let Ok(s) = std::str::from_utf8(value) {
+        s
+    } else {
+        return false;
+    };
+    let value_mime_result: Result<Mime, _> = value_string.parse();
+    match value_mime_result {
+        Err(_) => false, // step 3
+        Ok(value_mime) => match (value_mime.type_(), value_mime.subtype()) {
+            (mime::APPLICATION, mime::WWW_FORM_URLENCODED) |
+            (mime::MULTIPART, mime::FORM_DATA) |
+            (mime::TEXT, mime::PLAIN) => true,
+            _ => false, // step 4
+        },
+    }
+}
+
+// TODO: "DPR", "Downlink", "Save-Data", "Viewport-Width", "Width":
+// ... once parsed, the value should not be failure.
+// https://fetch.spec.whatwg.org/#cors-safelisted-request-header
+pub fn is_cors_safelisted_request_header<N: AsRef<str>, V: AsRef<[u8]>>(
+    name: &N,
+    value: &V,
+) -> bool {
+    let name: &str = name.as_ref();
+    let value: &[u8] = value.as_ref();
+    if value.len() > 128 {
+        return false;
+    }
+    match name {
+        "accept" => is_cors_safelisted_request_accept(value),
+        "accept-language" | "content-language" => is_cors_safelisted_language(value),
+        "content-type" => is_cors_safelisted_request_content_type(value),
+        _ => false,
+    }
+}
+
+/// <https://fetch.spec.whatwg.org/#cors-safelisted-method>
+pub fn is_cors_safelisted_method(m: &Method) -> bool {
+    match *m {
+        Method::GET | Method::HEAD | Method::POST => true,
+        _ => false,
     }
 }

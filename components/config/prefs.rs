@@ -58,7 +58,7 @@ pub fn pref_map() -> &'static Preferences<'static, Prefs> {
     &PREFS
 }
 
-pub fn add_user_prefs() {
+pub(crate) fn add_user_prefs() {
     if let Some(path) = user_prefs_path() {
         init_user_prefs(path);
     }
@@ -159,6 +159,9 @@ mod gen {
                 },
             },
             dom: {
+                webgpu: {
+                    enabled: bool,
+                },
                 bluetooth: {
                     enabled: bool,
                     testing: {
@@ -221,6 +224,9 @@ mod gen {
                     async_html_tokenizer: {
                         enabled: bool,
                     }
+                },
+                shadowdom: {
+                    enabled: bool,
                 },
                 svg: {
                     enabled: bool,
@@ -291,6 +297,10 @@ mod gen {
                 webxr: {
                     #[serde(default)]
                     enabled: bool,
+                    #[serde(default)]
+                    test: bool,
+                    #[serde(default)]
+                    glwindow: bool,
                 },
                 worklet: {
                     blockingsleep: {
@@ -441,11 +451,19 @@ mod gen {
                 }
             },
             media: {
+                glvideo: {
+                    enabled: bool,
+                },
                 testing: {
                     enabled: bool,
                 }
             },
             network: {
+                enforce_tls: {
+                    enabled: bool,
+                    localhost: bool,
+                    onion: bool,
+                },
                 http_cache: {
                     #[serde(rename = "network.http-cache.disabled")]
                     disabled: bool,

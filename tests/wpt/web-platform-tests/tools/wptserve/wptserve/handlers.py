@@ -1,4 +1,7 @@
-import cgi
+try:
+    import html
+except ImportError:
+    import cgi as html
 import json
 import os
 import sys
@@ -76,7 +79,7 @@ class DirectoryHandler(object):
 <ul>
 %(items)s
 </ul>
-""" % {"path": cgi.escape(url_path),
+""" % {"path": html.escape(url_path),
        "items": "\n".join(self.list_items(url_path, path))}  # noqa: E122
 
     def list_items(self, base_path, path):
@@ -93,29 +96,33 @@ class DirectoryHandler(object):
             yield ("""<li class="dir"><a href="%(link)s">%(name)s</a></li>""" %
                    {"link": link, "name": ".."})
         for item in sorted(os.listdir(path)):
-            link = cgi.escape(quote(item))
+            link = html.escape(quote(item))
             if os.path.isdir(os.path.join(path, item)):
                 link += "/"
                 class_ = "dir"
             else:
                 class_ = "file"
             yield ("""<li class="%(class)s"><a href="%(link)s">%(name)s</a></li>""" %
-                   {"link": link, "name": cgi.escape(item), "class": class_})
+                   {"link": link, "name": html.escape(item), "class": class_})
 
 
 def wrap_pipeline(path, request, response):
     query = parse_qs(request.url_parts.query)
+    pipe_string = ""
 
-    pipeline = None
-    if "pipe" in query:
-        pipeline = Pipeline(query["pipe"][-1])
-    elif ".sub." in path:
+    if ".sub." in path:
         ml_extensions = {".html", ".htm", ".xht", ".xhtml", ".xml", ".svg"}
         escape_type = "html" if os.path.splitext(path)[1] in ml_extensions else "none"
-        pipeline = Pipeline("sub(%s)" % escape_type)
+        pipe_string = "sub(%s)" % escape_type
 
-    if pipeline is not None:
-        response = pipeline(request, response)
+    if "pipe" in query:
+        if pipe_string:
+            pipe_string += "|"
+
+        pipe_string += query["pipe"][-1]
+
+    if pipe_string:
+        response = Pipeline(pipe_string)(request, response)
 
     return response
 

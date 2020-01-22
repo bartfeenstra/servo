@@ -13,7 +13,7 @@ use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::mutationrecord::MutationRecord;
-use crate::dom::node::Node;
+use crate::dom::node::{Node, ShadowIncluding};
 use crate::dom::window::Window;
 use crate::microtask::Microtask;
 use crate::script_thread::ScriptThread;
@@ -79,6 +79,7 @@ impl MutationObserver {
         }
     }
 
+    #[allow(non_snake_case)]
     pub fn Constructor(
         global: &Window,
         callback: Rc<MutationCallback>,
@@ -131,8 +132,13 @@ impl MutationObserver {
         let mut interested_observers: Vec<(DomRoot<MutationObserver>, Option<DOMString>)> = vec![];
 
         // Step 2 & 3
-        for node in target.inclusive_ancestors() {
-            for registered in &*node.registered_mutation_observers() {
+        for node in target.inclusive_ancestors(ShadowIncluding::No) {
+            let registered = node.registered_mutation_observers();
+            if registered.is_none() {
+                continue;
+            }
+
+            for registered in &*registered.unwrap() {
                 if &*node != target && !registered.options.subtree {
                     continue;
                 }
@@ -297,7 +303,7 @@ impl MutationObserverMethods for MutationObserver {
         // Step 7
         let add_new_observer = {
             let mut replaced = false;
-            for registered in &mut *target.registered_mutation_observers() {
+            for registered in &mut *target.registered_mutation_observers_mut() {
                 if &*registered.observer as *const MutationObserver !=
                     self as *const MutationObserver
                 {
@@ -318,20 +324,18 @@ impl MutationObserverMethods for MutationObserver {
 
         // Step 8
         if add_new_observer {
-            target
-                .registered_mutation_observers()
-                .push(RegisteredObserver {
-                    observer: DomRoot::from_ref(self),
-                    options: ObserverOptions {
-                        attributes,
-                        attribute_old_value,
-                        character_data,
-                        character_data_old_value,
-                        subtree,
-                        attribute_filter,
-                        child_list,
-                    },
-                });
+            target.add_mutation_observer(RegisteredObserver {
+                observer: DomRoot::from_ref(self),
+                options: ObserverOptions {
+                    attributes,
+                    attribute_old_value,
+                    character_data,
+                    character_data_old_value,
+                    subtree,
+                    attribute_filter,
+                    child_list,
+                },
+            });
 
             self.node_list.borrow_mut().push(DomRoot::from_ref(target));
         }

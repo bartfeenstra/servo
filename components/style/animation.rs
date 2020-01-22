@@ -16,8 +16,8 @@ use crate::properties::animated_properties::AnimatedProperty;
 use crate::properties::longhands::animation_direction::computed_value::single_value::T as AnimationDirection;
 use crate::properties::longhands::animation_play_state::computed_value::single_value::T as AnimationPlayState;
 use crate::properties::{self, CascadeMode, ComputedValues, LonghandId};
-use crate::rule_tree::CascadeLevel;
 use crate::stylesheets::keyframes_rule::{KeyframesAnimation, KeyframesStep, KeyframesStepValue};
+use crate::stylesheets::Origin;
 use crate::timer::Timer;
 use crate::values::computed::box_::TransitionProperty;
 use crate::values::computed::Time;
@@ -181,14 +181,6 @@ impl KeyframesAnimationState {
         self.current_direction = old_direction;
         self.started_at = new_started_at;
     }
-
-    #[inline]
-    fn is_paused(&self) -> bool {
-        match self.running_state {
-            KeyframesRunningState::Paused(..) => true,
-            KeyframesRunningState::Running => false,
-        }
-    }
 }
 
 impl fmt::Debug for KeyframesAnimationState {
@@ -242,15 +234,6 @@ impl Animation {
         match *self {
             Animation::Transition(ref node, _, _) => node,
             Animation::Keyframes(ref node, _, _, _) => node,
-        }
-    }
-
-    /// Whether this animation is paused. A transition can never be paused.
-    #[inline]
-    pub fn is_paused(&self) -> bool {
-        match *self {
-            Animation::Transition(..) => false,
-            Animation::Keyframes(_, _, _, ref state) => state.is_paused(),
         }
     }
 
@@ -488,7 +471,7 @@ fn compute_style_for_animation_step<E>(
     step: &KeyframesStep,
     previous_style: &ComputedValues,
     style_from_cascade: &Arc<ComputedValues>,
-    font_metrics_provider: &FontMetricsProvider,
+    font_metrics_provider: &dyn FontMetricsProvider,
 ) -> Arc<ComputedValues>
 where
     E: TElement,
@@ -508,7 +491,7 @@ where
                 guard
                     .normal_declaration_iter()
                     .filter(|declaration| declaration.is_animatable())
-                    .map(|decl| (decl, CascadeLevel::Animations))
+                    .map(|decl| (decl, Origin::Author))
             };
 
             // This currently ignores visited styles, which seems acceptable,
@@ -673,7 +656,7 @@ pub fn update_style_for_animation<E>(
     context: &SharedStyleContext,
     animation: &Animation,
     style: &mut Arc<ComputedValues>,
-    font_metrics_provider: &FontMetricsProvider,
+    font_metrics_provider: &dyn FontMetricsProvider,
 ) -> AnimationUpdate
 where
     E: TElement,

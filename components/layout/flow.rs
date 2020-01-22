@@ -35,25 +35,22 @@ use crate::flow_list::{FlowList, FlowListIterator, MutFlowListIterator};
 use crate::flow_ref::{FlowRef, WeakFlowRef};
 use crate::fragment::{CoordinateSystem, Fragment, FragmentBorderBoxIterator, Overflow};
 use crate::inline::InlineFlow;
-use crate::model::{CollapsibleMargins, IntrinsicISizes, MarginCollapseInfo};
-use crate::multicol::MulticolFlow;
+use crate::model::{CollapsibleMargins, IntrinsicISizes};
 use crate::parallel::FlowParallelInfo;
 use crate::table::TableFlow;
-use crate::table_caption::TableCaptionFlow;
 use crate::table_cell::TableCellFlow;
 use crate::table_colgroup::TableColGroupFlow;
 use crate::table_row::TableRowFlow;
 use crate::table_rowgroup::TableRowGroupFlow;
 use crate::table_wrapper::TableWrapperFlow;
 use app_units::Au;
-use euclid::{Point2D, Rect, Size2D, Vector2D};
+use euclid::default::{Point2D, Rect, Size2D, Vector2D};
 use gfx_traits::print_tree::PrintTree;
 use gfx_traits::StackingContextId;
 use num_traits::cast::FromPrimitive;
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use servo_geometry::{au_rect_to_f32_rect, f32_rect_to_au_rect, MaxRect};
 use std::fmt;
-use std::iter::Zip;
 use std::slice::IterMut;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -67,8 +64,7 @@ use style::logical_geometry::{LogicalRect, LogicalSize, WritingMode};
 use style::properties::ComputedValues;
 use style::selector_parser::RestyleDamage;
 use style::servo::restyle_damage::ServoRestyleDamage;
-use style::values::computed::LengthPercentageOrAuto;
-use webrender_api::LayoutTransform;
+use webrender_api::units::LayoutTransform;
 
 /// This marker trait indicates that a type is a struct with `#[repr(C)]` whose first field
 /// is of type `BaseFlow` or some type that also implements this trait.
@@ -130,11 +126,6 @@ pub trait Flow: HasBaseFlow + fmt::Debug + Sync + Send + 'static {
         panic!("called as_flex() on a non-flex flow")
     }
 
-    /// If this is a flex flow, returns the underlying object, borrowed mutably. Fails otherwise.
-    fn as_mut_flex(&mut self) -> &mut FlexFlow {
-        panic!("called as_mut_flex() on a non-flex flow")
-    }
-
     /// If this is an inline flow, returns the underlying object. Fails otherwise.
     fn as_inline(&self) -> &InlineFlow {
         panic!("called as_inline() on a non-inline flow")
@@ -144,12 +135,6 @@ pub trait Flow: HasBaseFlow + fmt::Debug + Sync + Send + 'static {
     /// otherwise.
     fn as_mut_inline(&mut self) -> &mut InlineFlow {
         panic!("called as_mut_inline() on a non-inline flow")
-    }
-
-    /// If this is a table wrapper flow, returns the underlying object, borrowed mutably. Fails
-    /// otherwise.
-    fn as_mut_table_wrapper(&mut self) -> &mut TableWrapperFlow {
-        panic!("called as_mut_table_wrapper() on a non-tablewrapper flow")
     }
 
     /// If this is a table wrapper flow, returns the underlying object. Fails otherwise.
@@ -203,20 +188,8 @@ pub trait Flow: HasBaseFlow + fmt::Debug + Sync + Send + 'static {
 
     /// If this is a table cell flow, returns the underlying object, borrowed mutably. Fails
     /// otherwise.
-    fn as_mut_table_caption(&mut self) -> &mut TableCaptionFlow {
-        panic!("called as_mut_table_caption() on a non-tablecaption flow")
-    }
-
-    /// If this is a table cell flow, returns the underlying object, borrowed mutably. Fails
-    /// otherwise.
     fn as_mut_table_cell(&mut self) -> &mut TableCellFlow {
         panic!("called as_mut_table_cell() on a non-tablecell flow")
-    }
-
-    /// If this is a multicol flow, returns the underlying object, borrowed mutably. Fails
-    /// otherwise.
-    fn as_mut_multicol(&mut self) -> &mut MulticolFlow {
-        panic!("called as_mut_multicol() on a non-multicol flow")
     }
 
     /// If this is a table cell flow, returns the underlying object. Fails otherwise.
@@ -432,14 +405,6 @@ pub trait Flow: HasBaseFlow + fmt::Debug + Sync + Send + 'static {
     /// Mutably iterates through fragments in this flow.
     fn mutate_fragments(&mut self, mutator: &mut dyn FnMut(&mut Fragment));
 
-    fn compute_collapsible_block_start_margin(
-        &mut self,
-        _layout_context: &mut LayoutContext,
-        _margin_collapse_info: &mut MarginCollapseInfo,
-    ) {
-        // The default implementation is a no-op.
-    }
-
     /// Marks this flow as the root flow. The default implementation is a no-op.
     fn mark_as_root(&mut self) {
         debug!("called mark_as_root() on a flow of type {:?}", self.class());
@@ -530,9 +495,6 @@ pub trait ImmutableFlowUtils {
     /// Returns true if this flow is a table caption flow.
     fn is_table_caption(self) -> bool;
 
-    /// Returns true if this flow is a proper table child.
-    fn is_proper_table_child(self) -> bool;
-
     /// Returns true if this flow is a table row flow.
     fn is_table_row(self) -> bool;
 
@@ -545,17 +507,8 @@ pub trait ImmutableFlowUtils {
     /// Returns true if this flow is a table rowgroup flow.
     fn is_table_rowgroup(self) -> bool;
 
-    /// Returns true if this flow is one of table-related flows.
-    fn is_table_kind(self) -> bool;
-
-    /// Returns true if this flow has no children.
-    fn is_leaf(self) -> bool;
-
     /// Returns the number of children that this flow possesses.
     fn child_count(self) -> usize;
-
-    /// Return true if this flow is a Block Container.
-    fn is_block_container(self) -> bool;
 
     /// Returns true if this flow is a block flow.
     fn is_block_flow(self) -> bool;
@@ -826,8 +779,6 @@ impl<'a> Iterator for AbsoluteDescendantIter<'a> {
     }
 }
 
-pub type AbsoluteDescendantOffsetIter<'a> = Zip<AbsoluteDescendantIter<'a>, IterMut<'a, Au>>;
-
 /// Information needed to compute absolute (i.e. viewport-relative) flow positions (not to be
 /// confused with absolutely-positioned flows) that is computed during block-size assignment.
 #[derive(Clone, Copy)]
@@ -1068,13 +1019,13 @@ impl BaseFlow {
                         flags.insert(FlowFlags::IS_ABSOLUTELY_POSITIONED);
 
                         let logical_position = style.logical_position();
-                        if logical_position.inline_start == LengthPercentageOrAuto::Auto &&
-                            logical_position.inline_end == LengthPercentageOrAuto::Auto
+                        if logical_position.inline_start.is_auto() &&
+                            logical_position.inline_end.is_auto()
                         {
                             flags.insert(FlowFlags::INLINE_POSITION_IS_STATIC);
                         }
-                        if logical_position.block_start == LengthPercentageOrAuto::Auto &&
-                            logical_position.block_end == LengthPercentageOrAuto::Auto
+                        if logical_position.block_start.is_auto() &&
+                            logical_position.block_end.is_auto()
                         {
                             flags.insert(FlowFlags::BLOCK_POSITION_IS_STATIC);
                         }
@@ -1161,13 +1112,12 @@ impl BaseFlow {
                 let logical_position = style.logical_position();
                 self.flags.set(
                     FlowFlags::INLINE_POSITION_IS_STATIC,
-                    logical_position.inline_start == LengthPercentageOrAuto::Auto &&
-                        logical_position.inline_end == LengthPercentageOrAuto::Auto,
+                    logical_position.inline_start.is_auto() &&
+                        logical_position.inline_end.is_auto(),
                 );
                 self.flags.set(
                     FlowFlags::BLOCK_POSITION_IS_STATIC,
-                    logical_position.block_start == LengthPercentageOrAuto::Auto &&
-                        logical_position.block_end == LengthPercentageOrAuto::Auto,
+                    logical_position.block_start.is_auto() && logical_position.block_end.is_auto(),
                 );
             }
         }
@@ -1203,10 +1153,6 @@ impl BaseFlow {
     pub fn debug_id(&self) -> usize {
         let p = self as *const _;
         p as usize
-    }
-
-    pub fn flow_id(&self) -> usize {
-        return self as *const BaseFlow as usize;
     }
 
     pub fn collect_stacking_contexts_for_children(
@@ -1250,19 +1196,6 @@ impl<'a> ImmutableFlowUtils for &'a dyn Flow {
     /// Returns true if this flow is a block flow or subclass thereof.
     fn is_block_like(self) -> bool {
         self.class().is_block_like()
-    }
-
-    /// Returns true if this flow is a proper table child.
-    /// 'Proper table child' is defined as table-row flow, table-rowgroup flow,
-    /// table-column-group flow, or table-caption flow.
-    fn is_proper_table_child(self) -> bool {
-        match self.class() {
-            FlowClass::TableRow |
-            FlowClass::TableRowGroup |
-            FlowClass::TableColGroup |
-            FlowClass::TableCaption => true,
-            _ => false,
-        }
     }
 
     /// Returns true if this flow is a table row flow.
@@ -1313,45 +1246,9 @@ impl<'a> ImmutableFlowUtils for &'a dyn Flow {
         }
     }
 
-    /// Returns true if this flow is one of table-related flows.
-    fn is_table_kind(self) -> bool {
-        match self.class() {
-            FlowClass::TableWrapper |
-            FlowClass::Table |
-            FlowClass::TableColGroup |
-            FlowClass::TableRowGroup |
-            FlowClass::TableRow |
-            FlowClass::TableCaption |
-            FlowClass::TableCell => true,
-            _ => false,
-        }
-    }
-
-    /// Returns true if this flow has no children.
-    fn is_leaf(self) -> bool {
-        self.base().children.is_empty()
-    }
-
     /// Returns the number of children that this flow possesses.
     fn child_count(self) -> usize {
         self.base().children.len()
-    }
-
-    /// Return true if this flow is a Block Container.
-    ///
-    /// Except for table fragments and replaced elements, block-level fragments (`BlockFlow`) are
-    /// also block container fragments.
-    /// Non-replaced inline blocks and non-replaced table cells are also block
-    /// containers.
-    fn is_block_container(self) -> bool {
-        match self.class() {
-            // TODO: Change this when inline-blocks are supported.
-            FlowClass::Block | FlowClass::TableCaption | FlowClass::TableCell => {
-                // FIXME: Actually check the type of the node
-                self.child_count() != 0
-            },
-            _ => false,
-        }
     }
 
     /// Returns true if this flow is a block flow.

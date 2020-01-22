@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::InCompartment;
 use crate::dom::bindings::codegen::Bindings::MediaDevicesBinding::MediaStreamConstraints;
 use crate::dom::bindings::codegen::Bindings::MediaDevicesBinding::{self, MediaDevicesMethods};
 use crate::dom::bindings::codegen::UnionTypes::BooleanOrMediaTrackConstraints;
@@ -13,9 +14,11 @@ use crate::dom::bindings::root::DomRoot;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::mediastream::MediaStream;
+use crate::dom::mediastreamtrack::MediaStreamTrack;
 use crate::dom::promise::Promise;
 use dom_struct::dom_struct;
 use servo_media::streams::capture::{Constrain, ConstrainRange, MediaTrackConstraintSet};
+use servo_media::streams::MediaStreamType;
 use servo_media::ServoMedia;
 use std::rc::Rc;
 
@@ -43,21 +46,27 @@ impl MediaDevices {
 impl MediaDevicesMethods for MediaDevices {
     /// https://w3c.github.io/mediacapture-main/#dom-mediadevices-getusermedia
     #[allow(unsafe_code)]
-    fn GetUserMedia(&self, constraints: &MediaStreamConstraints) -> Rc<Promise> {
-        let p = unsafe { Promise::new_in_current_compartment(&self.global()) };
+    fn GetUserMedia(
+        &self,
+        constraints: &MediaStreamConstraints,
+        comp: InCompartment,
+    ) -> Rc<Promise> {
+        let p = Promise::new_in_current_compartment(&self.global(), comp);
         let media = ServoMedia::get().unwrap();
-        let mut tracks = vec![];
+        let stream = MediaStream::new(&self.global());
         if let Some(constraints) = convert_constraints(&constraints.audio) {
             if let Some(audio) = media.create_audioinput_stream(constraints) {
-                tracks.push(audio)
+                let track = MediaStreamTrack::new(&self.global(), audio, MediaStreamType::Audio);
+                stream.add_track(&track);
             }
         }
         if let Some(constraints) = convert_constraints(&constraints.video) {
             if let Some(video) = media.create_videoinput_stream(constraints) {
-                tracks.push(video)
+                let track = MediaStreamTrack::new(&self.global(), video, MediaStreamType::Video);
+                stream.add_track(&track);
             }
         }
-        let stream = MediaStream::new(&self.global(), tracks);
+
         p.resolve_native(&stream);
         p
     }
@@ -69,11 +78,11 @@ fn convert_constraints(js: &BooleanOrMediaTrackConstraints) -> Option<MediaTrack
         BooleanOrMediaTrackConstraints::Boolean(true) => Some(Default::default()),
         BooleanOrMediaTrackConstraints::MediaTrackConstraints(ref c) => {
             Some(MediaTrackConstraintSet {
-                height: convert_culong(&c.parent.height),
-                width: convert_culong(&c.parent.width),
-                aspect: convert_cdouble(&c.parent.aspectRatio),
-                frame_rate: convert_cdouble(&c.parent.frameRate),
-                sample_rate: convert_culong(&c.parent.sampleRate),
+                height: c.parent.height.as_ref().and_then(convert_culong),
+                width: c.parent.width.as_ref().and_then(convert_culong),
+                aspect: c.parent.aspectRatio.as_ref().and_then(convert_cdouble),
+                frame_rate: c.parent.frameRate.as_ref().and_then(convert_cdouble),
+                sample_rate: c.parent.sampleRate.as_ref().and_then(convert_culong),
             })
         },
     }

@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use cssparser::RGBA;
-use euclid::{Point2D, Rect, Size2D, Transform2D};
+use euclid::default::{Point2D, Rect, Size2D, Transform2D};
 use ipc_channel::ipc::{IpcBytesReceiver, IpcBytesSender, IpcSender, IpcSharedMemory};
 use serde_bytes::ByteBuf;
 use std::default::Default;
@@ -21,17 +21,10 @@ pub struct CanvasId(pub u64);
 #[derive(Deserialize, Serialize)]
 pub enum CanvasMsg {
     Canvas2d(Canvas2dMsg, CanvasId),
-    Create(
-        IpcSender<CanvasId>,
-        Size2D<u32>,
-        webrender_api::RenderApiSender,
-        bool,
-    ),
     FromLayout(FromLayoutMsg, CanvasId),
     FromScript(FromScriptMsg, CanvasId),
-    Recreate(Size2D<u32>, CanvasId),
+    Recreate(Size2D<u64>, CanvasId),
     Close(CanvasId),
-    Exit,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -54,11 +47,11 @@ pub enum Canvas2dMsg {
     Fill,
     FillText(String, f64, f64, Option<f64>),
     FillRect(Rect<f32>),
-    GetImageData(Rect<u32>, Size2D<u32>, IpcBytesSender),
+    GetImageData(Rect<u64>, Size2D<u64>, IpcBytesSender),
     IsPointInPath(f64, f64, FillRule, IpcSender<bool>),
     LineTo(Point2D<f32>),
     MoveTo(Point2D<f32>),
-    PutImageData(Rect<u32>, IpcBytesReceiver),
+    PutImageData(Rect<u64>, IpcBytesReceiver),
     QuadraticCurveTo(Point2D<f32>, Point2D<f32>),
     Rect(Rect<f32>),
     RestoreContext,
@@ -172,7 +165,7 @@ impl SurfaceStyle {
         repeat_y: bool,
     ) -> Self {
         Self {
-            surface_data: surface_data.into(),
+            surface_data: ByteBuf::from(surface_data),
             surface_size,
             repeat_x,
             repeat_y,

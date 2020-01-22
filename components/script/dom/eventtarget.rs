@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::enter_realm;
 use crate::dom::beforeunloadevent::BeforeUnloadEvent;
 use crate::dom::bindings::callback::{CallbackContainer, CallbackFunction, ExceptionHandling};
 use crate::dom::bindings::cell::DomRefCell;
@@ -29,15 +30,16 @@ use crate::dom::element::Element;
 use crate::dom::errorevent::ErrorEvent;
 use crate::dom::event::{Event, EventBubbles, EventCancelable, EventStatus};
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::htmlformelement::FormControlElementHelpers;
 use crate::dom::node::document_from_node;
 use crate::dom::virtualmethods::VirtualMethods;
 use crate::dom::window::Window;
 use dom_struct::dom_struct;
 use fnv::FnvHasher;
-use js::jsapi::{JSAutoCompartment, JSFunction, JS_GetFunctionObject};
+use js::jsapi::{JSAutoRealm, JSFunction, JS_GetFunctionObject, SourceText};
 use js::rust::wrappers::CompileFunction;
 use js::rust::{AutoObjectVectorWrapper, CompileOptionsWrapper};
-use libc::{c_char, size_t};
+use libc::c_char;
 use servo_atoms::Atom;
 use servo_url::ServoUrl;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
@@ -45,6 +47,7 @@ use std::collections::HashMap;
 use std::default::Default;
 use std::ffi::CString;
 use std::hash::BuildHasherDefault;
+use std::marker::PhantomData;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
@@ -148,7 +151,6 @@ pub enum CompiledEventListener {
 }
 
 impl CompiledEventListener {
-    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#the-event-handler-processing-algorithm
     pub fn call_or_handle_event<T: DomObject>(
         &self,
@@ -166,7 +168,7 @@ impl CompiledEventListener {
                     CommonEventHandler::ErrorEventHandler(ref handler) => {
                         if let Some(event) = event.downcast::<ErrorEvent>() {
                             let cx = object.global().get_cx();
-                            rooted!(in(cx) let error = unsafe { event.Error(cx) });
+                            rooted!(in(*cx) let error = event.Error(cx));
                             let return_value = handler.Call_(
                                 object,
                                 EventOrString::String(event.Message()),
@@ -178,7 +180,7 @@ impl CompiledEventListener {
                             );
                             // Step 4
                             if let Ok(return_value) = return_value {
-                                rooted!(in(cx) let return_value = return_value);
+                                rooted!(in(*cx) let return_value = return_value);
                                 if return_value.handle().is_boolean() &&
                                     return_value.handle().to_boolean() == true
                                 {
@@ -223,17 +225,16 @@ impl CompiledEventListener {
                     CommonEventHandler::EventHandler(ref handler) => {
                         if let Ok(value) = handler.Call_(object, event, exception_handle) {
                             let cx = object.global().get_cx();
-                            rooted!(in(cx) let value = value);
+                            rooted!(in(*cx) let value = value);
                             let value = value.handle();
 
-                            //Step 4
-                            let should_cancel = match event.type_() {
-                                atom!("mouseover") => {
-                                    value.is_boolean() && value.to_boolean() == true
-                                },
-                                _ => value.is_boolean() && value.to_boolean() == false,
-                            };
+                            //Step 5
+                            let should_cancel = value.is_boolean() && value.to_boolean() == false;
+
                             if should_cancel {
+                                // FIXME: spec says to set the cancelled flag directly
+                                // here, not just to prevent default;
+                                // can that ever make a difference?
                                 event.PreventDefault();
                             }
                         }
@@ -338,6 +339,7 @@ impl EventTarget {
         reflect_dom_object(Box::new(EventTarget::new_inherited()), global, Wrap)
     }
 
+    #[allow(non_snake_case)]
     pub fn Constructor(global: &GlobalScope) -> Fallible<DomRoot<EventTarget>> {
         Ok(EventTarget::new(global))
     }
@@ -452,35 +454,50 @@ impl EventTarget {
     }
 
     // https://html.spec.whatwg.org/multipage/#getting-the-current-value-of-the-event-handler
+    // step 3
     #[allow(unsafe_code)]
     fn get_compiled_event_handler(
         &self,
         handler: InternalRawUncompiledHandler,
         ty: &Atom,
     ) -> Option<CommonEventHandler> {
-        // Step 1.1
+        // Step 3.1
         let element = self.downcast::<Element>();
         let document = match element {
             Some(element) => document_from_node(element),
             None => self.downcast::<Window>().unwrap().Document(),
         };
 
-        // Step 1.2
+        // Step 3.2
         if !document.is_scripting_enabled() {
             return None;
         }
 
-        // Step 1.3
+        // Step 3.3
         let body: Vec<u16> = handler.source.encode_utf16().collect();
 
-        // TODO step 1.5 (form owner)
+        // Step 3.4 is handler.line
 
-        // Step 1.6
+        // Step 3.5
+        let form_owner = element
+            .and_then(|e| e.as_maybe_form_control())
+            .and_then(|f| f.form_owner());
+
+        // Step 3.6 TODO: settings objects not implemented
+
+        // Step 3.7 is written as though we call the parser separately
+        // from the compiler; since we just call CompileFunction with
+        // source text, we handle parse errors later
+
+        // Step 3.8 TODO: settings objects not implemented
+
+        // Step 3.9
         let window = document.window();
 
         let url_serialized = CString::new(handler.url.to_string()).unwrap();
         let name = CString::new(&**ty).unwrap();
 
+        // Step 3.9, subsection ParameterList
         static mut ARG_NAMES: [*const c_char; 1] = [b"event\0" as *const u8 as *const c_char];
         static mut ERROR_ARG_NAMES: [*const c_char; 5] = [
             b"event\0" as *const u8 as *const c_char,
@@ -489,7 +506,6 @@ impl EventTarget {
             b"colno\0" as *const u8 as *const c_char,
             b"error\0" as *const u8 as *const c_char,
         ];
-        // step 10
         let is_error = ty == &atom!("error") && self.is::<Window>();
         let args = unsafe {
             if is_error {
@@ -500,38 +516,53 @@ impl EventTarget {
         };
 
         let cx = window.get_cx();
-        let options = CompileOptionsWrapper::new(cx, url_serialized.as_ptr(), handler.line as u32);
-        // TODO step 1.10.1-3 (document, form owner, element in scope chain)
+        let options = CompileOptionsWrapper::new(*cx, url_serialized.as_ptr(), handler.line as u32);
 
-        let scopechain = AutoObjectVectorWrapper::new(cx);
+        // Step 3.9, subsection Scope steps 1-6
+        let scopechain = AutoObjectVectorWrapper::new(*cx);
 
-        let _ac = JSAutoCompartment::new(cx, window.reflector().get_jsobject().get());
-        rooted!(in(cx) let mut handler = ptr::null_mut::<JSFunction>());
+        if let Some(element) = element {
+            scopechain.append(document.reflector().get_jsobject().get());
+            if let Some(form_owner) = form_owner {
+                scopechain.append(form_owner.reflector().get_jsobject().get());
+            }
+            scopechain.append(element.reflector().get_jsobject().get());
+        }
+
+        let _ac = enter_realm(&*window); // TODO 3.8 should replace this
+        rooted!(in(*cx) let mut handler = ptr::null_mut::<JSFunction>());
         let rv = unsafe {
             CompileFunction(
-                cx,
+                *cx,
                 scopechain.ptr,
                 options.ptr,
                 name.as_ptr(),
                 args.len() as u32,
                 args.as_ptr(),
-                body.as_ptr(),
-                body.len() as size_t,
+                &mut SourceText {
+                    units_: body.as_ptr() as *const _,
+                    length_: body.len() as u32,
+                    ownsUnits_: false,
+                    _phantom_0: PhantomData,
+                },
                 handler.handle_mut().into(),
             )
         };
         if !rv || handler.get().is_null() {
-            // Step 1.8.2
+            // Step 3.7
             unsafe {
-                let _ac = JSAutoCompartment::new(cx, self.reflector().get_jsobject().get());
+                let _ac = JSAutoRealm::new(*cx, self.reflector().get_jsobject().get());
                 // FIXME(#13152): dispatch error event.
-                report_pending_exception(cx, false);
+                report_pending_exception(*cx, false);
             }
-            // Step 1.8.1 / 1.8.3
             return None;
         }
 
-        // TODO step 1.11-13
+        // Step 3.10 happens when we drop _ac
+
+        // TODO Step 3.11
+
+        // Step 3.12
         let funobj = unsafe { JS_GetFunctionObject(handler.get()) };
         assert!(!funobj.is_null());
         // Step 1.14

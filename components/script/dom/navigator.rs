@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::InCompartment;
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding;
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding::NavigatorMethods;
 use crate::dom::bindings::error::Error;
@@ -10,7 +11,10 @@ use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bluetooth::Bluetooth;
 use crate::dom::gamepadlist::GamepadList;
+use crate::dom::gpu::GPU;
+use crate::dom::identityhub::Identities;
 use crate::dom::mediadevices::MediaDevices;
+use crate::dom::mediasession::MediaSession;
 use crate::dom::mimetypearray::MimeTypeArray;
 use crate::dom::navigatorinfo;
 use crate::dom::permissions::Permissions;
@@ -20,7 +24,13 @@ use crate::dom::serviceworkercontainer::ServiceWorkerContainer;
 use crate::dom::window::Window;
 use crate::dom::xr::XR;
 use dom_struct::dom_struct;
+use smallvec::SmallVec;
+use std::cell::RefCell;
 use std::rc::Rc;
+use webgpu::wgpu::{
+    id::{AdapterId, BindGroupLayoutId, BufferId, DeviceId, PipelineLayoutId},
+    Backend,
+};
 
 #[dom_struct]
 pub struct Navigator {
@@ -33,6 +43,10 @@ pub struct Navigator {
     mediadevices: MutNullableDom<MediaDevices>,
     gamepads: MutNullableDom<GamepadList>,
     permissions: MutNullableDom<Permissions>,
+    mediasession: MutNullableDom<MediaSession>,
+    gpu: MutNullableDom<GPU>,
+    #[ignore_malloc_size_of = "Defined in wgpu"]
+    gpu_id_hub: RefCell<Identities>,
 }
 
 impl Navigator {
@@ -47,6 +61,9 @@ impl Navigator {
             mediadevices: Default::default(),
             gamepads: Default::default(),
             permissions: Default::default(),
+            mediasession: Default::default(),
+            gpu: Default::default(),
+            gpu_id_hub: RefCell::new(Identities::new()),
         }
     }
 
@@ -59,10 +76,51 @@ impl Navigator {
     }
 }
 
+impl Navigator {
+    pub fn create_adapter_ids(&self) -> SmallVec<[AdapterId; 4]> {
+        self.gpu_id_hub.borrow_mut().create_adapter_ids()
+    }
+
+    pub fn create_device_id(&self, backend: Backend) -> DeviceId {
+        self.gpu_id_hub.borrow_mut().create_device_id(backend)
+    }
+
+    pub fn create_buffer_id(&self, backend: Backend) -> BufferId {
+        self.gpu_id_hub.borrow_mut().create_buffer_id(backend)
+    }
+
+    pub fn create_bind_group_layout_id(&self, backend: Backend) -> BindGroupLayoutId {
+        self.gpu_id_hub
+            .borrow_mut()
+            .create_bind_group_layout_id(backend)
+    }
+
+    pub fn create_pipeline_layout_id(&self, backend: Backend) -> PipelineLayoutId {
+        self.gpu_id_hub
+            .borrow_mut()
+            .create_pipeline_layout_id(backend)
+    }
+}
+
 impl NavigatorMethods for Navigator {
     // https://html.spec.whatwg.org/multipage/#dom-navigator-product
     fn Product(&self) -> DOMString {
         navigatorinfo::Product()
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-navigator-productsub
+    fn ProductSub(&self) -> DOMString {
+        navigatorinfo::ProductSub()
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-navigator-vendor
+    fn Vendor(&self) -> DOMString {
+        navigatorinfo::Vendor()
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-navigator-vendorsub
+    fn VendorSub(&self) -> DOMString {
+        navigatorinfo::VendorSub()
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-navigator-taintenabled
@@ -87,7 +145,7 @@ impl NavigatorMethods for Navigator {
 
     // https://html.spec.whatwg.org/multipage/#dom-navigator-useragent
     fn UserAgent(&self) -> DOMString {
-        navigatorinfo::UserAgent()
+        navigatorinfo::UserAgent(self.global().get_user_agent())
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-navigator-appversion
@@ -150,9 +208,8 @@ impl NavigatorMethods for Navigator {
     }
 
     // https://w3c.github.io/webvr/spec/1.1/#navigator-getvrdisplays-attribute
-    #[allow(unsafe_code)]
-    fn GetVRDisplays(&self) -> Rc<Promise> {
-        let promise = unsafe { Promise::new_in_current_compartment(&self.global()) };
+    fn GetVRDisplays(&self, comp: InCompartment) -> Rc<Promise> {
+        let promise = Promise::new_in_current_compartment(&self.global(), comp);
         let displays = self.Xr().get_displays();
         match displays {
             Ok(displays) => promise.resolve_native(&displays),
@@ -170,5 +227,26 @@ impl NavigatorMethods for Navigator {
     fn MediaDevices(&self) -> DomRoot<MediaDevices> {
         self.mediadevices
             .or_init(|| MediaDevices::new(&self.global()))
+    }
+
+    /// https://w3c.github.io/mediasession/#dom-navigator-mediasession
+    fn MediaSession(&self) -> DomRoot<MediaSession> {
+        self.mediasession.or_init(|| {
+            // There is a single MediaSession instance per Pipeline
+            // and only one active MediaSession globally.
+            //
+            // MediaSession creation can happen in two cases:
+            //
+            // - If content gets `navigator.mediaSession`
+            // - If a media instance (HTMLMediaElement so far) starts playing media.
+            let global = self.global();
+            let window = global.as_window();
+            MediaSession::new(window)
+        })
+    }
+
+    // https://gpuweb.github.io/gpuweb/#dom-navigator-gpu
+    fn Gpu(&self) -> DomRoot<GPU> {
+        self.gpu.or_init(|| GPU::new(&self.global()))
     }
 }

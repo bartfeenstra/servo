@@ -17,7 +17,7 @@ use xml5ever::tokenizer::XmlTokenizer;
 use xml5ever::tree_builder::{Tracer as XmlTracer, XmlTreeBuilder};
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[must_root]
+#[unrooted_must_root_lint::must_root]
 pub struct Tokenizer {
     #[ignore_malloc_size_of = "Defined in xml5ever"]
     inner: XmlTokenizer<XmlTreeBuilder<Dom<Node>, Sink>>,
@@ -40,18 +40,9 @@ impl Tokenizer {
     }
 
     pub fn feed(&mut self, input: &mut BufferQueue) -> Result<(), DomRoot<HTMLScriptElement>> {
-        if !input.is_empty() {
-            while let Some(chunk) = input.pop_front() {
-                self.inner.feed(chunk);
-                if let Some(script) = self.inner.sink.sink.script.take() {
-                    return Err(script);
-                }
-            }
-        } else {
-            self.inner.run();
-            if let Some(script) = self.inner.sink.sink.script.take() {
-                return Err(script);
-            }
+        self.inner.run(input);
+        if let Some(script) = self.inner.sink.sink.script.take() {
+            return Err(script);
         }
         Ok(())
     }

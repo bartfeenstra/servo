@@ -13,19 +13,21 @@ use std::{f32, f64};
 use style_traits::{CssWriter, ToCss};
 
 /// A computed angle in degrees.
-#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
 #[derive(
     Add,
     Animate,
     Clone,
     Copy,
     Debug,
+    Deserialize,
     MallocSizeOf,
     PartialEq,
     PartialOrd,
+    Serialize,
     ToAnimatedZero,
     ToResolvedValue,
 )]
+#[repr(C)]
 pub struct Angle(CSSFloat);
 
 impl ToCss for Angle {

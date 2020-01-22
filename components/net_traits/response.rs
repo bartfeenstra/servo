@@ -6,8 +6,7 @@
 //! resulting from a [fetch operation](https://fetch.spec.whatwg.org/#concept-fetch)
 use crate::{FetchMetadata, FilteredMetadata, Metadata, NetworkError, ReferrerPolicy};
 use crate::{ResourceFetchTiming, ResourceTimingType};
-use headers_core::HeaderMapExt;
-use headers_ext::{AccessControlExposeHeaders, ContentType};
+use headers::{AccessControlExposeHeaders, ContentType, HeaderMapExt};
 use http::{HeaderMap, StatusCode};
 use hyper_serde::Serde;
 use servo_arc::Arc;
@@ -69,12 +68,6 @@ pub enum HttpsState {
     Modern,
 }
 
-pub enum ResponseMsg {
-    Chunk(Vec<u8>),
-    Finished,
-    Errored,
-}
-
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct ResponseInit {
     pub url: ServoUrl,
@@ -121,7 +114,8 @@ pub struct Response {
     #[ignore_malloc_size_of = "AtomicBool heap size undefined"]
     pub aborted: Arc<AtomicBool>,
     /// track network metrics
-    pub resource_timing: ResourceFetchTiming,
+    #[ignore_malloc_size_of = "Mutex heap size undefined"]
+    pub resource_timing: Arc<Mutex<ResourceFetchTiming>>,
 }
 
 impl Response {
@@ -144,7 +138,7 @@ impl Response {
             internal_response: None,
             return_internal: true,
             aborted: Arc::new(AtomicBool::new(false)),
-            resource_timing: resource_timing,
+            resource_timing: Arc::new(Mutex::new(resource_timing)),
         }
     }
 
@@ -178,7 +172,9 @@ impl Response {
             internal_response: None,
             return_internal: true,
             aborted: Arc::new(AtomicBool::new(false)),
-            resource_timing: ResourceFetchTiming::new(ResourceTimingType::Error),
+            resource_timing: Arc::new(Mutex::new(ResourceFetchTiming::new(
+                ResourceTimingType::Error,
+            ))),
         }
     }
 
@@ -224,8 +220,8 @@ impl Response {
         }
     }
 
-    pub fn get_resource_timing(&self) -> &ResourceFetchTiming {
-        &self.resource_timing
+    pub fn get_resource_timing(&self) -> Arc<Mutex<ResourceFetchTiming>> {
+        Arc::clone(&self.resource_timing)
     }
 
     /// Convert to a filtered response, of type `filter_type`.

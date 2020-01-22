@@ -19,7 +19,7 @@ pub type FileOrigin = String;
 /// Relative slice positions of a sequence,
 /// whose semantic should be consistent with (start, end) parameters in
 /// <https://w3c.github.io/FileAPI/#dfn-slice>
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct RelativePos {
     /// Relative to first byte if non-negative,
     /// relative to one past last byte if negative,
@@ -88,14 +88,6 @@ impl RelativePos {
         Range {
             start: start.to_usize().unwrap(),
             end: (start + span).to_usize().unwrap(),
-        }
-    }
-
-    /// Inverse operation of to_abs_range
-    pub fn from_abs_range(range: Range<usize>, size: usize) -> RelativePos {
-        RelativePos {
-            start: range.start as i64,
-            end: Some(size as i64 - range.end as i64),
         }
     }
 }

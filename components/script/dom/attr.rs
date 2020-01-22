@@ -2,32 +2,30 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::cell::DomRefCell;
+use crate::dom::bindings::cell::{DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::AttrBinding::{self, AttrMethods};
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{DomRoot, LayoutDom, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::customelementregistry::CallbackReaction;
+use crate::dom::document::Document;
 use crate::dom::element::{AttributeMutation, Element};
 use crate::dom::mutationobserver::{Mutation, MutationObserver};
 use crate::dom::node::Node;
 use crate::dom::virtualmethods::vtable_for;
-use crate::dom::window::Window;
 use crate::script_thread::ScriptThread;
 use devtools_traits::AttrInfo;
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Namespace, Prefix};
 use servo_atoms::Atom;
 use std::borrow::ToOwned;
-use std::cell::Ref;
 use std::mem;
 use style::attr::{AttrIdentifier, AttrValue};
 
 // https://dom.spec.whatwg.org/#interface-attr
 #[dom_struct]
 pub struct Attr {
-    reflector_: Reflector,
+    node_: Node,
     identifier: AttrIdentifier,
     value: DomRefCell<AttrValue>,
 
@@ -37,6 +35,7 @@ pub struct Attr {
 
 impl Attr {
     fn new_inherited(
+        document: &Document,
         local_name: LocalName,
         value: AttrValue,
         name: LocalName,
@@ -45,7 +44,7 @@ impl Attr {
         owner: Option<&Element>,
     ) -> Attr {
         Attr {
-            reflector_: Reflector::new(),
+            node_: Node::new_inherited(document),
             identifier: AttrIdentifier {
                 local_name: local_name,
                 name: name,
@@ -58,7 +57,7 @@ impl Attr {
     }
 
     pub fn new(
-        window: &Window,
+        document: &Document,
         local_name: LocalName,
         value: AttrValue,
         name: LocalName,
@@ -66,11 +65,11 @@ impl Attr {
         prefix: Option<Prefix>,
         owner: Option<&Element>,
     ) -> DomRoot<Attr> {
-        reflect_dom_object(
+        Node::reflect_node(
             Box::new(Attr::new_inherited(
-                local_name, value, name, namespace, prefix, owner,
+                document, local_name, value, name, namespace, prefix, owner,
             )),
-            window,
+            document,
             AttrBinding::Wrap,
         )
     }
@@ -114,35 +113,10 @@ impl AttrMethods for Attr {
         }
     }
 
-    // https://dom.spec.whatwg.org/#dom-attr-textcontent
-    fn TextContent(&self) -> DOMString {
-        self.Value()
-    }
-
-    // https://dom.spec.whatwg.org/#dom-attr-textcontent
-    fn SetTextContent(&self, value: DOMString) {
-        self.SetValue(value)
-    }
-
-    // https://dom.spec.whatwg.org/#dom-attr-nodevalue
-    fn NodeValue(&self) -> DOMString {
-        self.Value()
-    }
-
-    // https://dom.spec.whatwg.org/#dom-attr-nodevalue
-    fn SetNodeValue(&self, value: DOMString) {
-        self.SetValue(value)
-    }
-
     // https://dom.spec.whatwg.org/#dom-attr-name
     fn Name(&self) -> DOMString {
         // FIXME(ajeffrey): convert directly from LocalName to DOMString
         DOMString::from(&*self.identifier.name)
-    }
-
-    // https://dom.spec.whatwg.org/#dom-attr-nodename
-    fn NodeName(&self) -> DOMString {
-        self.Name()
     }
 
     // https://dom.spec.whatwg.org/#dom-attr-namespaceuri
@@ -194,7 +168,7 @@ impl Attr {
             ScriptThread::enqueue_callback_reaction(owner, reaction, None);
         }
 
-        assert_eq!(Some(owner), self.owner().deref());
+        assert_eq!(Some(owner), self.owner().as_deref());
         owner.will_mutate_attr(self);
         self.swap_value(&mut value);
         if self.identifier.namespace == ns!() {
@@ -227,7 +201,11 @@ impl Attr {
         match (self.owner(), owner) {
             (Some(old), None) => {
                 // Already gone from the list of attributes of old owner.
-                assert!(old.get_attribute(&ns, &self.identifier.local_name).deref() != Some(self))
+                assert!(
+                    old.get_attribute(&ns, &self.identifier.local_name)
+                        .as_deref() !=
+                        Some(self)
+                )
             },
             (Some(old), Some(new)) => assert_eq!(&*old, new),
             _ => {},
@@ -246,16 +224,21 @@ impl Attr {
             value: String::from(self.Value()),
         }
     }
+
+    pub fn qualified_name(&self) -> DOMString {
+        match self.prefix() {
+            Some(ref prefix) => DOMString::from(format!("{}:{}", prefix, &**self.local_name())),
+            None => DOMString::from(&**self.local_name()),
+        }
+    }
 }
 
 #[allow(unsafe_code)]
 pub trait AttrHelpersForLayout {
     unsafe fn value_forever(&self) -> &'static AttrValue;
     unsafe fn value_ref_forever(&self) -> &'static str;
-    unsafe fn value_atom_forever(&self) -> Option<Atom>;
     unsafe fn value_tokens_forever(&self) -> Option<&'static [Atom]>;
     unsafe fn local_name_atom_forever(&self) -> LocalName;
-    unsafe fn value_for_layout(&self) -> &AttrValue;
 }
 
 #[allow(unsafe_code)]
@@ -272,15 +255,6 @@ impl AttrHelpersForLayout for LayoutDom<Attr> {
     }
 
     #[inline]
-    unsafe fn value_atom_forever(&self) -> Option<Atom> {
-        let value = (*self.unsafe_get()).value.borrow_for_layout();
-        match *value {
-            AttrValue::Atom(ref val) => Some(val.clone()),
-            _ => None,
-        }
-    }
-
-    #[inline]
     unsafe fn value_tokens_forever(&self) -> Option<&'static [Atom]> {
         // This transmute is used to cheat the lifetime restriction.
         match *self.value_forever() {
@@ -292,10 +266,5 @@ impl AttrHelpersForLayout for LayoutDom<Attr> {
     #[inline]
     unsafe fn local_name_atom_forever(&self) -> LocalName {
         (*self.unsafe_get()).identifier.local_name.clone()
-    }
-
-    #[inline]
-    unsafe fn value_for_layout(&self) -> &AttrValue {
-        (*self.unsafe_get()).value.borrow_for_layout()
     }
 }

@@ -10,7 +10,9 @@ use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
 use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
     ChannelCountMode, ChannelInterpretation,
 };
-use crate::dom::bindings::codegen::InheritTypes::{AudioNodeTypeId, EventTargetTypeId};
+use crate::dom::bindings::codegen::InheritTypes::{
+    AudioNodeTypeId, AudioScheduledSourceNodeTypeId, EventTargetTypeId,
+};
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -56,7 +58,11 @@ impl AudioNode {
             mode: options.mode.into(),
             interpretation: options.interpretation.into(),
         };
-        let node_id = context.audio_context_impl().create_node(node_type, ch);
+        let node_id = context
+            .audio_context_impl()
+            .lock()
+            .unwrap()
+            .create_node(node_type, ch);
         Ok(AudioNode::new_inherited_for_id(
             node_id,
             context,
@@ -88,6 +94,8 @@ impl AudioNode {
     pub fn message(&self, message: AudioNodeMessage) {
         self.context
             .audio_context_impl()
+            .lock()
+            .unwrap()
             .message_node(self.node_id, message);
     }
 
@@ -114,10 +122,14 @@ impl AudioNodeMethods for AudioNode {
 
         // servo-media takes care of ignoring duplicated connections.
 
-        self.context.audio_context_impl().connect_ports(
-            self.node_id().output(output),
-            destination.node_id().input(input),
-        );
+        self.context
+            .audio_context_impl()
+            .lock()
+            .unwrap()
+            .connect_ports(
+                self.node_id().output(output),
+                destination.node_id().input(input),
+            );
 
         Ok(DomRoot::from_ref(destination))
     }
@@ -134,10 +146,14 @@ impl AudioNodeMethods for AudioNode {
 
         // servo-media takes care of ignoring duplicated connections.
 
-        self.context.audio_context_impl().connect_ports(
-            self.node_id().output(output),
-            dest.node_id().param(dest.param_type()),
-        );
+        self.context
+            .audio_context_impl()
+            .lock()
+            .unwrap()
+            .connect_ports(
+                self.node_id().output(output),
+                dest.node_id().param(dest.param_type()),
+            );
 
         Ok(())
     }
@@ -146,6 +162,8 @@ impl AudioNodeMethods for AudioNode {
     fn Disconnect(&self) -> ErrorResult {
         self.context
             .audio_context_impl()
+            .lock()
+            .unwrap()
             .disconnect_all_from(self.node_id());
         Ok(())
     }
@@ -154,6 +172,8 @@ impl AudioNodeMethods for AudioNode {
     fn Disconnect_(&self, out: u32) -> ErrorResult {
         self.context
             .audio_context_impl()
+            .lock()
+            .unwrap()
             .disconnect_output(self.node_id().output(out));
         Ok(())
     }
@@ -162,6 +182,8 @@ impl AudioNodeMethods for AudioNode {
     fn Disconnect__(&self, to: &AudioNode) -> ErrorResult {
         self.context
             .audio_context_impl()
+            .lock()
+            .unwrap()
             .disconnect_between(self.node_id(), to.node_id());
         Ok(())
     }
@@ -170,6 +192,8 @@ impl AudioNodeMethods for AudioNode {
     fn Disconnect___(&self, to: &AudioNode, out: u32) -> ErrorResult {
         self.context
             .audio_context_impl()
+            .lock()
+            .unwrap()
             .disconnect_output_between(self.node_id().output(out), to.node_id());
         Ok(())
     }
@@ -178,6 +202,8 @@ impl AudioNodeMethods for AudioNode {
     fn Disconnect____(&self, to: &AudioNode, out: u32, inp: u32) -> ErrorResult {
         self.context
             .audio_context_impl()
+            .lock()
+            .unwrap()
             .disconnect_output_between_to(self.node_id().output(out), to.node_id().input(inp));
         Ok(())
     }
@@ -186,6 +212,8 @@ impl AudioNodeMethods for AudioNode {
     fn Disconnect_____(&self, param: &AudioParam) -> ErrorResult {
         self.context
             .audio_context_impl()
+            .lock()
+            .unwrap()
             .disconnect_to(self.node_id(), param.node_id().param(param.param_type()));
         Ok(())
     }
@@ -194,6 +222,8 @@ impl AudioNodeMethods for AudioNode {
     fn Disconnect______(&self, param: &AudioParam, out: u32) -> ErrorResult {
         self.context
             .audio_context_impl()
+            .lock()
+            .unwrap()
             .disconnect_output_between_to(
                 self.node_id().output(out),
                 param.node_id().param(param.param_type()),
@@ -232,6 +262,13 @@ impl AudioNodeMethods for AudioNode {
                 }
             },
             EventTargetTypeId::AudioNode(AudioNodeTypeId::PannerNode) => {
+                if value > 2 {
+                    return Err(Error::NotSupported);
+                }
+            },
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::AudioScheduledSourceNode(
+                AudioScheduledSourceNodeTypeId::StereoPannerNode,
+            )) => {
                 if value > 2 {
                     return Err(Error::NotSupported);
                 }
@@ -276,6 +313,13 @@ impl AudioNodeMethods for AudioNode {
                 }
             },
             EventTargetTypeId::AudioNode(AudioNodeTypeId::PannerNode) => {
+                if value == ChannelCountMode::Max {
+                    return Err(Error::NotSupported);
+                }
+            },
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::AudioScheduledSourceNode(
+                AudioScheduledSourceNodeTypeId::StereoPannerNode,
+            )) => {
                 if value == ChannelCountMode::Max {
                     return Err(Error::NotSupported);
                 }

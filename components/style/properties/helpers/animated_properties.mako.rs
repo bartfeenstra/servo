@@ -9,9 +9,7 @@
     from itertools import groupby
 %>
 
-#[cfg(feature = "gecko")] use crate::gecko_bindings::structs::RawServoAnimationValueMap;
 #[cfg(feature = "gecko")] use crate::gecko_bindings::structs::nsCSSPropertyID;
-#[cfg(feature = "gecko")] use crate::gecko_bindings::sugar::ownership::{HasFFI, HasSimpleFFI};
 use itertools::{EitherOrBoth, Itertools};
 use crate::properties::{CSSWideKeyword, PropertyDeclaration};
 use crate::properties::longhands;
@@ -20,11 +18,11 @@ use crate::properties::LonghandId;
 use servo_arc::Arc;
 use smallvec::SmallVec;
 use std::ptr;
-use std::mem::{self, ManuallyDrop};
+use std::mem;
 use crate::hash::FxHashMap;
 use super::ComputedValues;
 use crate::values::animated::{Animate, Procedure, ToAnimatedValue, ToAnimatedZero};
-use crate::values::animated::effects::Filter as AnimatedFilter;
+use crate::values::animated::effects::AnimatedFilter;
 #[cfg(feature = "gecko")] use crate::values::computed::TransitionProperty;
 use crate::values::computed::{ClipRect, Context};
 use crate::values::computed::ToComputedValue;
@@ -190,13 +188,6 @@ impl AnimatedProperty {
 /// composed for each TransitionProperty.
 pub type AnimationValueMap = FxHashMap<LonghandId, AnimationValue>;
 
-#[cfg(feature = "gecko")]
-unsafe impl HasFFI for AnimationValueMap {
-    type FFIType = RawServoAnimationValueMap;
-}
-#[cfg(feature = "gecko")]
-unsafe impl HasSimpleFFI for AnimationValueMap {}
-
 /// An enum to represent a single computed value belonging to an animated
 /// property in order to be interpolated with another one. When interpolating,
 /// both values need to belong to the same property.
@@ -261,12 +252,12 @@ impl Clone for AnimationValue {
             }
 
             unsafe {
-                let mut out = mem::uninitialized();
+                let mut out = mem::MaybeUninit::uninit();
                 ptr::write(
-                    &mut out as *mut _ as *mut CopyVariants,
+                    out.as_mut_ptr() as *mut CopyVariants,
                     *(self as *const _ as *const CopyVariants),
                 );
-                return out;
+                return out.assume_init();
             }
         }
 
@@ -278,15 +269,15 @@ impl Clone for AnimationValue {
                 ${props[0].camel_case}(value.clone())
                 % else:
                 unsafe {
-                    let mut out = ManuallyDrop::new(mem::uninitialized());
+                    let mut out = mem::MaybeUninit::uninit();
                     ptr::write(
-                        &mut out as *mut _ as *mut AnimationValueVariantRepr<${ty}>,
+                        out.as_mut_ptr() as *mut AnimationValueVariantRepr<${ty}>,
                         AnimationValueVariantRepr {
                             tag: *(self as *const _ as *const u16),
                             value: value.clone(),
                         },
                     );
-                    ManuallyDrop::into_inner(out)
+                    out.assume_init()
                 }
                 % endif
             }
@@ -365,15 +356,15 @@ impl AnimationValue {
                 PropertyDeclaration::${props[0].camel_case}(value)
                 % else:
                 unsafe {
-                    let mut out = mem::uninitialized();
+                    let mut out = mem::MaybeUninit::uninit();
                     ptr::write(
-                        &mut out as *mut _ as *mut PropertyDeclarationVariantRepr<${specified}>,
+                        out.as_mut_ptr() as *mut PropertyDeclarationVariantRepr<${specified}>,
                         PropertyDeclarationVariantRepr {
                             tag: *(self as *const _ as *const u16),
                             value,
                         },
                     );
-                    out
+                    out.assume_init()
                 }
                 % endif
             }
@@ -400,7 +391,7 @@ impl AnimationValue {
                 x.boxed,
                 not x.is_animatable_with_computed_value,
                 x.style_struct.inherited,
-                x.ident in SYSTEM_FONT_LONGHANDS and product == "gecko",
+                x.ident in SYSTEM_FONT_LONGHANDS and engine == "gecko",
             )
         %>
 
@@ -433,15 +424,15 @@ impl AnimationValue {
                 % endif
 
                 unsafe {
-                    let mut out = mem::uninitialized();
+                    let mut out = mem::MaybeUninit::uninit();
                     ptr::write(
-                        &mut out as *mut _ as *mut AnimationValueVariantRepr<${ty}>,
+                        out.as_mut_ptr() as *mut AnimationValueVariantRepr<${ty}>,
                         AnimationValueVariantRepr {
                             tag: longhand_id.to_physical(context.builder.writing_mode) as u16,
                             value,
                         },
                     );
-                    out
+                    out.assume_init()
                 }
             }
             % endfor
@@ -588,15 +579,15 @@ impl Animate for AnimationValue {
                     let value = this.animate(&other_repr.value, procedure)?;
                     % endif
 
-                    let mut out = mem::uninitialized();
+                    let mut out = mem::MaybeUninit::uninit();
                     ptr::write(
-                        &mut out as *mut _ as *mut AnimationValueVariantRepr<${ty}>,
+                        out.as_mut_ptr() as *mut AnimationValueVariantRepr<${ty}>,
                         AnimationValueVariantRepr {
                             tag: this_tag,
                             value,
                         },
                     );
-                    out
+                    out.assume_init()
                 }
                 % endfor
                 ${" |\n".join("{}(void)".format(prop.camel_case) for prop in unanimated)} => {
@@ -773,20 +764,26 @@ macro_rules! animated_list_impl {
     }
 }
 
+animated_list_impl!(<T> for crate::OwnedSlice<T>);
 animated_list_impl!(<T> for SmallVec<[T; 1]>);
 animated_list_impl!(<T> for Vec<T>);
 
-/// <https://drafts.csswg.org/css-transitions/#animtype-visibility>
+/// <https://drafts.csswg.org/web-animations-1/#animating-visibility>
 impl Animate for Visibility {
     #[inline]
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
-        let (this_weight, other_weight) = procedure.weights();
-        match (*self, *other) {
-            (Visibility::Visible, _) => {
-                Ok(if this_weight > 0.0 { *self } else { *other })
-            },
-            (_, Visibility::Visible) => {
-                Ok(if other_weight > 0.0 { *other } else { *self })
+        match procedure {
+            Procedure::Interpolate { .. } => {
+                let (this_weight, other_weight) = procedure.weights();
+                match (*self, *other) {
+                    (Visibility::Visible, _) => {
+                        Ok(if this_weight > 0.0 { *self } else { *other })
+                    },
+                    (_, Visibility::Visible) => {
+                        Ok(if other_weight > 0.0 { *other } else { *self })
+                    },
+                    _ => Err(()),
+                }
             },
             _ => Err(()),
         }
@@ -859,7 +856,7 @@ impl Animate for AnimatedFilter {
                 Ok(Filter::${func}(animate_multiplicative_factor(this, other, procedure)?))
             },
             % endfor
-            % if product == "gecko":
+            % if engine == "gecko":
             (&Filter::DropShadow(ref this), &Filter::DropShadow(ref other)) => {
                 Ok(Filter::DropShadow(this.animate(other, procedure)?))
             },
@@ -879,7 +876,7 @@ impl ToAnimatedZero for AnimatedFilter {
             % for func in ['Brightness', 'Contrast', 'Opacity', 'Saturate']:
             Filter::${func}(_) => Ok(Filter::${func}(1.)),
             % endfor
-            % if product == "gecko":
+            % if engine == "gecko":
             Filter::DropShadow(ref this) => Ok(Filter::DropShadow(this.to_animated_zero()?)),
             % endif
             _ => Err(()),

@@ -10,7 +10,7 @@ use crate::context::QuirksMode;
 use crate::dom::TElement;
 use crate::hash::map as hash_map;
 use crate::hash::{HashMap, HashSet};
-use crate::rule_tree::{CascadeLevel, ShadowCascadeOrder};
+use crate::rule_tree::CascadeLevel;
 use crate::selector_parser::SelectorImpl;
 use crate::stylist::Rule;
 use crate::{Atom, LocalName, Namespace, WeakAtom};
@@ -171,7 +171,6 @@ impl SelectorMap<Rule> {
         context: &mut MatchingContext<E::Impl>,
         flags_setter: &mut F,
         cascade_level: CascadeLevel,
-        shadow_cascade_order: ShadowCascadeOrder,
     ) where
         E: TElement,
         F: FnMut(&E, ElementSelectorFlags),
@@ -182,10 +181,6 @@ impl SelectorMap<Rule> {
 
         let quirks_mode = context.quirks_mode();
 
-        // At the end, we're going to sort the rules that we added, so remember
-        // where we began.
-        let init_len = matching_rules_list.len();
-
         if rule_hash_target.is_root() {
             SelectorMap::get_matching_rules(
                 element,
@@ -194,7 +189,6 @@ impl SelectorMap<Rule> {
                 context,
                 flags_setter,
                 cascade_level,
-                shadow_cascade_order,
             );
         }
 
@@ -207,7 +201,6 @@ impl SelectorMap<Rule> {
                     context,
                     flags_setter,
                     cascade_level,
-                    shadow_cascade_order,
                 )
             }
         }
@@ -221,7 +214,6 @@ impl SelectorMap<Rule> {
                     context,
                     flags_setter,
                     cascade_level,
-                    shadow_cascade_order,
                 )
             }
         });
@@ -234,7 +226,6 @@ impl SelectorMap<Rule> {
                 context,
                 flags_setter,
                 cascade_level,
-                shadow_cascade_order,
             )
         }
 
@@ -246,7 +237,6 @@ impl SelectorMap<Rule> {
                 context,
                 flags_setter,
                 cascade_level,
-                shadow_cascade_order,
             )
         }
 
@@ -257,23 +247,17 @@ impl SelectorMap<Rule> {
             context,
             flags_setter,
             cascade_level,
-            shadow_cascade_order,
         );
-
-        // Sort only the rules we just added.
-        matching_rules_list[init_len..]
-            .sort_unstable_by_key(|block| (block.specificity, block.source_order()));
     }
 
     /// Adds rules in `rules` that match `element` to the `matching_rules` list.
-    fn get_matching_rules<E, F>(
+    pub(crate) fn get_matching_rules<E, F>(
         element: E,
         rules: &[Rule],
         matching_rules: &mut ApplicableDeclarationList,
         context: &mut MatchingContext<E::Impl>,
         flags_setter: &mut F,
         cascade_level: CascadeLevel,
-        shadow_cascade_order: ShadowCascadeOrder,
     ) where
         E: TElement,
         F: FnMut(&E, ElementSelectorFlags),
@@ -287,9 +271,7 @@ impl SelectorMap<Rule> {
                 context,
                 flags_setter,
             ) {
-                matching_rules.push(
-                    rule.to_applicable_declaration_block(cascade_level, shadow_cascade_order),
-                );
+                matching_rules.push(rule.to_applicable_declaration_block(cascade_level));
             }
         }
     }

@@ -6,6 +6,7 @@
 package org.mozilla.servo;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
@@ -20,7 +21,9 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+import android.util.Log;
 
+import org.mozilla.servo.MediaSession;
 import org.mozilla.servoview.ServoView;
 import org.mozilla.servoview.Servo;
 
@@ -39,6 +42,7 @@ public class MainActivity extends Activity implements Servo.Client {
     ProgressBar mProgressBar;
     TextView mIdleText;
     boolean mCanGoBack;
+    MediaSession mMediaSession;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -74,12 +78,19 @@ public class MainActivity extends Activity implements Servo.Client {
         Intent intent = getIntent();
         String args = intent.getStringExtra("servoargs");
         String log = intent.getStringExtra("servolog");
-        mServoView.setServoArgs(args, log);
+        String gstdebug = intent.getStringExtra("gstdebug");
+        mServoView.setServoArgs(args, log, gstdebug);
 
         if (Intent.ACTION_VIEW.equals(intent.getAction())) {
           mServoView.loadUri(intent.getData());
         }
         setupUrlField();
+    }
+
+    @Override
+    protected void onDestroy() {
+      super.onDestroy();
+      mMediaSession.hideMediaSessionControls();
     }
 
     private void setupUrlField() {
@@ -109,6 +120,10 @@ public class MainActivity extends Activity implements Servo.Client {
             uri =  URLUtil.composeSearchUrl(text, "https://duckduckgo.com/html/?q=%s", "%s");
         } else {
             uri = URLUtil.guessUrl(text);
+
+            if (uri.startsWith("http://") && !text.startsWith("http://")) {
+                uri = uri.replaceFirst("http://", "https://");
+            }
         }
 
         mServoView.loadUri(Uri.parse(uri));
@@ -126,6 +141,14 @@ public class MainActivity extends Activity implements Servo.Client {
     }
     public void onStopClicked(View v) {
         mServoView.stop();
+    }
+
+    @Override
+    public void onAlert(String message) {
+      AlertDialog.Builder builder = new AlertDialog.Builder(this);
+      builder.setMessage(message);
+      AlertDialog alert = builder.create();
+      alert.show();
     }
 
     @Override
@@ -162,6 +185,19 @@ public class MainActivity extends Activity implements Servo.Client {
         mCanGoBack = canGoBack;
     }
 
+    @Override
+    public boolean onAllowNavigation(String url) {
+        if (url.startsWith("market://")) {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                return false;
+            } catch (Exception e) {
+                Log.e("onAllowNavigation", e.toString());
+            }
+        }
+        return true;
+    }
+
     public void onRedrawing(boolean redrawing) {
         if (redrawing) {
             mIdleText.setText("LOOP");
@@ -175,6 +211,7 @@ public class MainActivity extends Activity implements Servo.Client {
         mServoView.onPause();
         super.onPause();
     }
+
     @Override
     public void onResume() {
         mServoView.onResume();
@@ -188,5 +225,45 @@ public class MainActivity extends Activity implements Servo.Client {
         } else {
             super.onBackPressed();
         }
+    }
+
+    @Override
+    public void onMediaSessionMetadata(String title, String artist, String album) {
+      if (mMediaSession == null) {
+        mMediaSession = new MediaSession(mServoView, this, getApplicationContext());
+      }
+      Log.d("onMediaSessionMetadata", title + " " + artist + " " + album);
+      mMediaSession.updateMetadata(title, artist, album);
+    }
+
+    @Override
+    public void onMediaSessionPlaybackStateChange(int state) {
+      Log.d("onMediaSessionPlaybackStateChange", String.valueOf(state));
+      if (mMediaSession == null) {
+        mMediaSession = new MediaSession(mServoView, this, getApplicationContext());
+      }
+
+      mMediaSession.setPlaybackState(state);
+
+      if (state == MediaSession.PLAYBACK_STATE_NONE) {
+          mMediaSession.hideMediaSessionControls();
+          return;
+      }
+      if (state == MediaSession.PLAYBACK_STATE_PLAYING ||
+          state == MediaSession.PLAYBACK_STATE_PAUSED) {
+          mMediaSession.showMediaSessionControls();
+          return;
+      }
+    }
+
+    @Override
+    public void onMediaSessionSetPositionState(float duration, float position, float playbackRate) {
+        Log.d("onMediaSessionSetPositionState", duration + " " + position + " " + playbackRate);
+        if (mMediaSession == null) {
+            mMediaSession = new MediaSession(mServoView, this, getApplicationContext());
+        }
+
+        mMediaSession.setPositionState(duration, position, playbackRate);
+        return;
     }
 }

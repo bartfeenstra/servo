@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "ports/servo",
+    "ports/glutin",
+    "ports/gstplugin",
     "ports/libsimpleservo/capi/",
     "ports/libsimpleservo/jniapi/",
     "ports/libmlservo/",
@@ -24,3 +25,10 @@ opt-level = 3
 #
 #     [patch."https://github.com/servo/<repository>"]
 #     <crate> = { path = "/path/to/local/checkout" }
+
+# Those are here to dedupe winapi since mio is still using winapi 0.2.
+mio = { git = "https://github.com/servo/mio.git", branch = "servo" }
+# https://github.com/retep998/winapi-rs/pull/816
+winapi = { git = "https://github.com/servo/winapi-rs", branch = "patch-1" }
+spirv_cross = { git = "https://github.com/kvark/spirv_cross", branch = "wgpu" }
+backtrace = { git = "https://github.com/MeFisto94/backtrace-rs", branch = "fix-strtab-freeing-crash" }

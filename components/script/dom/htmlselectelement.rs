@@ -12,7 +12,7 @@ use crate::dom::bindings::codegen::Bindings::HTMLSelectElementBinding::HTMLSelec
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::UnionTypes::HTMLElementOrLong;
 use crate::dom::bindings::codegen::UnionTypes::HTMLOptionElementOrHTMLOptGroupElement;
-//use dom::bindings::error::ErrorResult;
+use crate::dom::bindings::error::ErrorResult;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
@@ -25,7 +25,7 @@ use crate::dom::htmlformelement::{FormControl, FormDatum, FormDatumValue, HTMLFo
 use crate::dom::htmloptgroupelement::HTMLOptGroupElement;
 use crate::dom::htmloptionelement::HTMLOptionElement;
 use crate::dom::htmloptionscollection::HTMLOptionsCollection;
-use crate::dom::node::{window_from_node, Node, UnbindContext};
+use crate::dom::node::{window_from_node, BindContext, Node, UnbindContext};
 use crate::dom::nodelist::NodeList;
 use crate::dom::validation::Validatable;
 use crate::dom::validitystate::{ValidationFlags, ValidityState};
@@ -62,6 +62,7 @@ pub struct HTMLSelectElement {
     htmlelement: HTMLElement,
     options: MutNullableDom<HTMLOptionsCollection>,
     form_owner: MutNullableDom<HTMLFormElement>,
+    labels_node_list: MutNullableDom<NodeList>,
 }
 
 static DEFAULT_SELECT_SIZE: u32 = 0;
@@ -81,6 +82,7 @@ impl HTMLSelectElement {
             ),
             options: Default::default(),
             form_owner: Default::default(),
+            labels_node_list: Default::default(),
         }
     }
 
@@ -100,7 +102,7 @@ impl HTMLSelectElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#concept-select-option-list
-    fn list_of_options(&self) -> impl Iterator<Item = DomRoot<HTMLOptionElement>> {
+    pub fn list_of_options(&self) -> impl Iterator<Item = DomRoot<HTMLOptionElement>> {
         self.upcast::<Node>().children().flat_map(|node| {
             if node.is::<HTMLOptionElement>() {
                 let node = DomRoot::downcast::<HTMLOptionElement>(node).unwrap();
@@ -202,13 +204,13 @@ impl HTMLSelectElementMethods for HTMLSelectElement {
         ValidityState::new(&window, self.upcast())
     }
 
-    // Note: this function currently only exists for union.html.
     // https://html.spec.whatwg.org/multipage/#dom-select-add
     fn Add(
         &self,
-        _element: HTMLOptionElementOrHTMLOptGroupElement,
-        _before: Option<HTMLElementOrLong>,
-    ) {
+        element: HTMLOptionElementOrHTMLOptGroupElement,
+        before: Option<HTMLElementOrLong>,
+    ) -> ErrorResult {
+        self.Options().Add(element, before)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-fe-disabled
@@ -250,9 +252,7 @@ impl HTMLSelectElementMethods for HTMLSelectElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-lfe-labels
-    fn Labels(&self) -> DomRoot<NodeList> {
-        self.upcast::<HTMLElement>().labels()
-    }
+    make_labels_getter!(Labels, labels_node_list);
 
     // https://html.spec.whatwg.org/multipage/#dom-select-options
     fn Options(&self) -> DomRoot<HTMLOptionsCollection> {
@@ -280,6 +280,11 @@ impl HTMLSelectElementMethods for HTMLSelectElement {
     // https://html.spec.whatwg.org/multipage/#dom-select-item
     fn IndexedGetter(&self, index: u32) -> Option<DomRoot<Element>> {
         self.Options().IndexedGetter(index)
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-select-setter
+    fn IndexedSetter(&self, index: u32, value: Option<&HTMLOptionElement>) -> ErrorResult {
+        self.Options().IndexedSetter(index, value)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-select-nameditem
@@ -382,9 +387,9 @@ impl VirtualMethods for HTMLSelectElement {
         }
     }
 
-    fn bind_to_tree(&self, tree_in_doc: bool) {
+    fn bind_to_tree(&self, context: &BindContext) {
         if let Some(ref s) = self.super_type() {
-            s.bind_to_tree(tree_in_doc);
+            s.bind_to_tree(context);
         }
 
         self.upcast::<Element>()

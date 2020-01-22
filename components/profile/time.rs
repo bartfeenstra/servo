@@ -18,8 +18,7 @@ use profile_traits::time::{TimerMetadataFrameType, TimerMetadataReflowType};
 use servo_config::opts::OutputOptions;
 use std::borrow::ToOwned;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
-use std::error::Error;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
@@ -136,6 +135,7 @@ impl Formattable for ProfilerCategory {
             ProfilerCategory::ScriptParseHTML => "Script Parse HTML",
             ProfilerCategory::ScriptParseXML => "Script Parse XML",
             ProfilerCategory::ScriptPlannedNavigation => "Script Planned Navigation",
+            ProfilerCategory::ScriptPortMessage => "Script Port Message",
             ProfilerCategory::ScriptResize => "Script Resize",
             ProfilerCategory::ScriptEvent => "Script Event",
             ProfilerCategory::ScriptUpdateReplacedElement => "Script Update Replaced Element",
@@ -171,10 +171,16 @@ pub struct Profiler {
     output: Option<OutputOptions>,
     pub last_msg: Option<ProfilerMsg>,
     trace: Option<TraceDump>,
+    blocked_layout_queries: HashMap<String, u32>,
+    profile_heartbeats: bool,
 }
 
 impl Profiler {
-    pub fn create(output: &Option<OutputOptions>, file_path: Option<String>) -> ProfilerChan {
+    pub fn create(
+        output: &Option<OutputOptions>,
+        file_path: Option<String>,
+        profile_heartbeats: bool,
+    ) -> ProfilerChan {
         let (chan, port) = ipc::channel().unwrap();
         match *output {
             Some(ref option) => {
@@ -184,7 +190,8 @@ impl Profiler {
                     .name("Time profiler".to_owned())
                     .spawn(move || {
                         let trace = file_path.as_ref().and_then(|p| TraceDump::new(p).ok());
-                        let mut profiler = Profiler::new(port, trace, Some(outputoption));
+                        let mut profiler =
+                            Profiler::new(port, trace, Some(outputoption), profile_heartbeats);
                         profiler.start();
                     })
                     .expect("Thread spawning failed");
@@ -216,7 +223,7 @@ impl Profiler {
                         .name("Time profiler".to_owned())
                         .spawn(move || {
                             let trace = file_path.as_ref().and_then(|p| TraceDump::new(p).ok());
-                            let mut profiler = Profiler::new(port, trace, None);
+                            let mut profiler = Profiler::new(port, trace, None, profile_heartbeats);
                             profiler.start();
                         })
                         .expect("Thread spawning failed");
@@ -239,12 +246,16 @@ impl Profiler {
             },
         }
 
-        heartbeats::init();
+        heartbeats::init(profile_heartbeats);
         let profiler_chan = ProfilerChan(chan);
 
         // only spawn the application-level profiler thread if its heartbeat is enabled
-        let run_ap_thread =
-            || heartbeats::is_heartbeat_enabled(&ProfilerCategory::ApplicationHeartbeat);
+        let run_ap_thread = move || {
+            heartbeats::is_heartbeat_enabled(
+                &ProfilerCategory::ApplicationHeartbeat,
+                profile_heartbeats,
+            )
+        };
         if run_ap_thread() {
             let profiler_chan = profiler_chan.clone();
             // min of 1 heartbeat/sec, max of 20 should provide accurate enough power/energy readings
@@ -298,6 +309,7 @@ impl Profiler {
         port: IpcReceiver<ProfilerMsg>,
         trace: Option<TraceDump>,
         output: Option<OutputOptions>,
+        profile_heartbeats: bool,
     ) -> Profiler {
         Profiler {
             port: port,
@@ -305,6 +317,8 @@ impl Profiler {
             output: output,
             last_msg: None,
             trace: trace,
+            blocked_layout_queries: HashMap::new(),
+            profile_heartbeats,
         }
     }
 
@@ -323,7 +337,7 @@ impl Profiler {
     fn handle_msg(&mut self, msg: ProfilerMsg) -> bool {
         match msg.clone() {
             ProfilerMsg::Time(k, t, e) => {
-                heartbeats::maybe_heartbeat(&k.0, t.0, t.1, e.0, e.1);
+                heartbeats::maybe_heartbeat(&k.0, t.0, t.1, e.0, e.1, self.profile_heartbeats);
                 if let Some(ref mut trace) = self.trace {
                     trace.write_one(&k, t, e);
                 }
@@ -344,6 +358,9 @@ impl Profiler {
                         .unwrap(),
                     None => sender.send(ProfilerData::NoRecords).unwrap(),
                 };
+            },
+            ProfilerMsg::BlockedLayoutQuery(url) => {
+                *self.blocked_layout_queries.entry(url).or_insert(0) += 1;
             },
             ProfilerMsg::Exit(chan) => {
                 heartbeats::cleanup();
@@ -379,11 +396,7 @@ impl Profiler {
             Some(OutputOptions::FileName(ref filename)) => {
                 let path = Path::new(&filename);
                 let mut file = match File::create(&path) {
-                    Err(e) => panic!(
-                        "Couldn't create {}: {}",
-                        path.display(),
-                        Error::description(&e)
-                    ),
+                    Err(e) => panic!("Couldn't create {}: {}", path.display(), e),
                     Ok(file) => file,
                 };
                 write!(
@@ -410,6 +423,11 @@ impl Profiler {
                         )
                         .unwrap();
                     }
+                }
+
+                write!(file, "_url\t_blocked layout queries_\n").unwrap();
+                for (url, count) in &self.blocked_layout_queries {
+                    write!(file, "{}\t{}\n", url, count).unwrap();
                 }
             },
             Some(OutputOptions::Stdout(_)) => {
@@ -448,6 +466,12 @@ impl Profiler {
                         )
                         .unwrap();
                     }
+                }
+                writeln!(&mut lock, "").unwrap();
+
+                writeln!(&mut lock, "_url_\t_blocked layout queries_").unwrap();
+                for (url, count) in &self.blocked_layout_queries {
+                    writeln!(&mut lock, "{}\t{}", url, count).unwrap();
                 }
                 writeln!(&mut lock, "").unwrap();
             },

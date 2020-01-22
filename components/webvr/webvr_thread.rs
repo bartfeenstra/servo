@@ -4,19 +4,20 @@
 
 use canvas_traits::webgl;
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use euclid::Size2D;
-use gleam::gl::Gl;
+use euclid::default::Size2D;
 use ipc_channel::ipc;
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
 use msg::constellation_msg::PipelineId;
 use rust_webvr::VRServiceManager;
 use script_traits::ConstellationMsg;
 use servo_config::pref;
+use sparkle::gl::Gl;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc;
 use std::{thread, time};
 use webvr_traits::webvr::*;
-use webvr_traits::{WebVRMsg, WebVRResult};
+use webvr_traits::{WebVRMsg, WebVRPoseInformation, WebVRResult};
 
 /// WebVRThread owns native VRDisplays, handles their life cycle inside Servo and
 /// acts a doorman for untrusted VR requests from DOM Objects. These are the key components
@@ -46,6 +47,7 @@ pub struct WebVRThread {
     vr_compositor_chan: WebVRCompositorSender,
     polling_events: bool,
     presenting: HashMap<u32, PipelineId>,
+    mock: Option<mpsc::Sender<MockVRControlMsg>>,
 }
 
 impl WebVRThread {
@@ -65,6 +67,7 @@ impl WebVRThread {
             vr_compositor_chan: vr_compositor_chan,
             polling_events: false,
             presenting: HashMap::new(),
+            mock: None,
         }
     }
 
@@ -127,6 +130,16 @@ impl WebVRThread {
                 },
                 WebVRMsg::GetGamepads(synced_ids, sender) => {
                     self.handle_get_gamepads(synced_ids, sender);
+                },
+                WebVRMsg::GetGamepadsForDisplay(display_id, sender) => {
+                    self.handle_get_gamepads_for_display(display_id, sender);
+                },
+
+                WebVRMsg::CreateMockDisplay(init) => {
+                    self.handle_create_mock(init);
+                },
+                WebVRMsg::MessageMockDisplay(msg) => {
+                    self.handle_message_mock_display(msg);
                 },
                 WebVRMsg::Exit => break,
             }
@@ -251,6 +264,32 @@ impl WebVRThread {
         self.vr_compositor_chan.send(compositor).unwrap();
     }
 
+    fn handle_get_gamepads_for_display(
+        &mut self,
+        display_id: u32,
+        sender: IpcSender<WebVRResult<Vec<(VRGamepadData, VRGamepadState)>>>,
+    ) {
+        match self.service.get_display(display_id) {
+            Some(display) => {
+                let gamepads = display.borrow_mut().fetch_gamepads();
+                match gamepads {
+                    Ok(gamepads) => {
+                        let data = gamepads
+                            .iter()
+                            .map(|g| {
+                                let g = g.borrow();
+                                (g.data(), g.state())
+                            })
+                            .collect();
+                        sender.send(Ok(data)).unwrap();
+                    },
+                    Err(e) => sender.send(Err(e)).unwrap(),
+                }
+            },
+            None => sender.send(Err("Device not found".into())).unwrap(),
+        }
+    }
+
     fn handle_get_gamepads(
         &mut self,
         synced_ids: Vec<u32>,
@@ -271,6 +310,22 @@ impl WebVRThread {
             })
             .collect();
         sender.send(Ok(data)).unwrap();
+    }
+
+    fn handle_create_mock(&mut self, init: MockVRInit) {
+        if self.mock.is_some() {
+            warn!("Mock display already created");
+            return;
+        }
+        self.mock = Some(self.service.register_mock_with_remote(init));
+    }
+
+    fn handle_message_mock_display(&mut self, msg: MockVRControlMsg) {
+        self.mock
+            .as_ref()
+            .expect("Mock Display not yet set up")
+            .send(msg)
+            .expect("Could not send message to mock display");
     }
 
     fn poll_events(&mut self, sender: IpcSender<bool>) {
@@ -374,22 +429,30 @@ impl WebVRCompositorHandler {
 
 impl webgl::WebVRRenderHandler for WebVRCompositorHandler {
     #[allow(unsafe_code)]
-    fn handle(
-        &mut self,
-        gl: &dyn Gl,
-        cmd: webgl::WebVRCommand,
-        texture: Option<(u32, Size2D<i32>)>,
-    ) {
+    fn handle(&mut self, gl: &Gl, cmd: webgl::WebVRCommand, texture: Option<(u32, Size2D<i32>)>) {
         match cmd {
             webgl::WebVRCommand::Create(compositor_id) => {
                 if let Some(compositor) = self.create_compositor(compositor_id) {
                     unsafe { (*compositor.0).start_present(None) };
                 }
             },
-            webgl::WebVRCommand::SyncPoses(compositor_id, near, far, sender) => {
+            webgl::WebVRCommand::SyncPoses(compositor_id, near, far, get_gamepads, sender) => {
                 if let Some(compositor) = self.compositors.get(&compositor_id) {
                     let pose = unsafe { (*compositor.0).future_frame_data(near, far) };
-                    let _ = sender.send(Ok(pose));
+                    let mut pose_information = WebVRPoseInformation {
+                        frame: pose,
+                        gamepads: vec![],
+                    };
+                    if get_gamepads {
+                        let gamepads = unsafe { (*compositor.0).fetch_gamepads() };
+                        if let Ok(gamepads) = gamepads {
+                            for gamepad in gamepads {
+                                let g = gamepad.borrow();
+                                pose_information.gamepads.push((g.id(), g.state()));
+                            }
+                        }
+                    }
+                    let _ = sender.send(Ok(pose_information));
                 } else {
                     let _ = sender.send(Err(()));
                 }

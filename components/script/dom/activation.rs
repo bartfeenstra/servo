@@ -12,6 +12,7 @@ use crate::dom::mouseevent::MouseEvent;
 use crate::dom::node::window_from_node;
 use crate::dom::window::ReflowReason;
 use script_layout_interface::message::ReflowGoal;
+use script_traits::MouseButton;
 
 /// Trait for elements with defined activation behavior
 pub trait Activatable {
@@ -28,9 +29,6 @@ pub trait Activatable {
 
     // https://html.spec.whatwg.org/multipage/#run-post-click-activation-steps
     fn activation_behavior(&self, event: &Event, target: &EventTarget);
-
-    // https://html.spec.whatwg.org/multipage/#implicit-submission
-    fn implicit_submission(&self, ctrl_key: bool, shift_key: bool, alt_key: bool, meta_key: bool);
 
     // https://html.spec.whatwg.org/multipage/#concept-selector-active
     fn enter_formal_activation_state(&self) {
@@ -96,6 +94,7 @@ pub fn synthetic_click_activation(
         alt_key,
         meta_key,
         0,
+        MouseButton::Left as u16,
         None,
         None,
     );

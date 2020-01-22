@@ -6,13 +6,16 @@ use crate::dom::bindings::codegen::Bindings::LocationBinding;
 use crate::dom::bindings::codegen::Bindings::LocationBinding::LocationMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
+use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
-use crate::dom::bindings::str::{DOMString, USVString};
+use crate::dom::bindings::str::USVString;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::urlhelper::UrlHelper;
 use crate::dom::window::Window;
 use dom_struct::dom_struct;
+use net_traits::request::Referrer;
+use script_traits::{HistoryEntryReplacement, LoadData, LoadOrigin};
 use servo_url::{MutableOrigin, ServoUrl};
 
 #[dom_struct]
@@ -37,14 +40,38 @@ impl Location {
         )
     }
 
+    /// https://html.spec.whatwg.org/multipage/#location-object-navigate
+    fn navigate(
+        &self,
+        url: ServoUrl,
+        referrer: Referrer,
+        replacement_flag: HistoryEntryReplacement,
+        reload_triggered: bool,
+    ) {
+        let document = self.window.Document();
+        let referrer_policy = document.get_referrer_policy();
+        let pipeline_id = self.window.upcast::<GlobalScope>().pipeline_id();
+        let load_data = LoadData::new(
+            LoadOrigin::Script(document.origin().immutable().clone()),
+            url,
+            Some(pipeline_id),
+            Some(referrer),
+            referrer_policy,
+        );
+        // TODO: rethrow exceptions, set exceptions enabled flag.
+        self.window
+            .load_url(replacement_flag, reload_triggered, load_data);
+    }
+
     fn get_url(&self) -> ServoUrl {
         self.window.get_url()
     }
 
     fn set_url_component(&self, value: USVString, setter: fn(&mut ServoUrl, USVString)) {
         let mut url = self.window.get_url();
+        let referrer = Referrer::ReferrerUrl(url.clone());
         setter(&mut url, value);
-        self.window.load_url(url, false, false, None);
+        self.navigate(url, referrer, HistoryEntryReplacement::Disabled, false);
     }
 
     fn check_same_origin_domain(&self) -> ErrorResult {
@@ -62,7 +89,9 @@ impl Location {
 
     // https://html.spec.whatwg.org/multipage/#dom-location-reload
     pub fn reload_without_origin_check(&self) {
-        self.window.load_url(self.get_url(), true, true, None);
+        let url = self.get_url();
+        let referrer = Referrer::ReferrerUrl(url.clone());
+        self.navigate(url, referrer, HistoryEntryReplacement::Enabled, true);
     }
 
     #[allow(dead_code)]
@@ -79,7 +108,8 @@ impl LocationMethods for Location {
         //       _entry settings object_.
         let base_url = self.window.get_url();
         if let Ok(url) = base_url.join(&url.0) {
-            self.window.load_url(url, false, false, None);
+            let referrer = Referrer::ReferrerUrl(base_url.clone());
+            self.navigate(url, referrer, HistoryEntryReplacement::Disabled, false);
             Ok(())
         } else {
             Err(Error::Syntax)
@@ -89,7 +119,9 @@ impl LocationMethods for Location {
     // https://html.spec.whatwg.org/multipage/#dom-location-reload
     fn Reload(&self) -> ErrorResult {
         self.check_same_origin_domain()?;
-        self.window.load_url(self.get_url(), true, true, None);
+        let url = self.get_url();
+        let referrer = Referrer::ReferrerUrl(url.clone());
+        self.navigate(url, referrer, HistoryEntryReplacement::Enabled, true);
         Ok(())
     }
 
@@ -100,7 +132,8 @@ impl LocationMethods for Location {
         //       _entry settings object_.
         let base_url = self.window.get_url();
         if let Ok(url) = base_url.join(&url.0) {
-            self.window.load_url(url, true, false, None);
+            let referrer = Referrer::ReferrerUrl(base_url.clone());
+            self.navigate(url, referrer, HistoryEntryReplacement::Enabled, false);
             Ok(())
         } else {
             Err(Error::Syntax)
@@ -164,11 +197,13 @@ impl LocationMethods for Location {
     // https://html.spec.whatwg.org/multipage/#dom-location-href
     fn SetHref(&self, value: USVString) -> ErrorResult {
         // Note: no call to self.check_same_origin_domain()
-        let url = match self.window.get_url().join(&value.0) {
+        let current_url = self.window.get_url();
+        let url = match current_url.join(&value.0) {
             Ok(url) => url,
             Err(e) => return Err(Error::Type(format!("Couldn't parse URL: {}", e))),
         };
-        self.window.load_url(url, false, false, None);
+        let referrer = Referrer::ReferrerUrl(current_url.clone());
+        self.navigate(url, referrer, HistoryEntryReplacement::Disabled, false);
         Ok(())
     }
 
@@ -209,11 +244,6 @@ impl LocationMethods for Location {
         self.check_same_origin_domain()?;
         self.set_url_component(value, UrlHelper::SetProtocol);
         Ok(())
-    }
-
-    // https://html.spec.whatwg.org/multipage/#dom-location-href
-    fn Stringifier(&self) -> Fallible<DOMString> {
-        Ok(DOMString::from(self.GetHref()?.0))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-search

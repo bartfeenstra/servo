@@ -311,7 +311,7 @@ where
 
 /// Writes all the items in `src` into a slice in the shared memory buffer and
 /// returns a pointer to the slice.
-unsafe fn to_shmem_slice<'a, T, I>(src: I, builder: &mut SharedMemoryBuilder) -> *mut [T]
+pub unsafe fn to_shmem_slice<'a, T, I>(src: I, builder: &mut SharedMemoryBuilder) -> *mut [T]
 where
     T: 'a + ToShmem,
     I: ExactSizeIterator<Item = &'a T>,
@@ -412,9 +412,10 @@ impl<T: ToShmem, A: Array<Item = T>> ToShmem for SmallVec<A> {
                 SmallVec::from_raw_parts(dest, self.len(), self.len())
             } else {
                 // Place the items inline.
-                let mut inline: A = mem::uninitialized();
-                to_shmem_slice_ptr(self.iter(), inline.ptr_mut(), builder);
-                SmallVec::from_buf_and_len(inline, self.len())
+                let mut s = SmallVec::new();
+                to_shmem_slice_ptr(self.iter(), s.as_mut_ptr(), builder);
+                s.set_len(self.len());
+                s
             }
         };
 

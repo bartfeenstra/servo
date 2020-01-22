@@ -10,15 +10,20 @@
 use crate::actor::{Actor, ActorMessageStatus, ActorRegistry};
 use crate::actors::object::ObjectActor;
 use crate::protocol::JsonPacketStream;
+use crate::{ConsoleAPICall, ConsoleMessage, ConsoleMsg, PageErrorMsg};
 use devtools_traits::CachedConsoleMessage;
 use devtools_traits::EvaluateJSReply::{ActorValue, BooleanValue, StringValue};
 use devtools_traits::EvaluateJSReply::{NullValue, NumberValue, VoidValue};
-use devtools_traits::{CachedConsoleMessageTypes, DevtoolScriptControlMsg};
+use devtools_traits::{
+    CachedConsoleMessageTypes, ConsoleAPI, DevtoolScriptControlMsg, LogLevel, PageError,
+};
 use ipc_channel::ipc::{self, IpcSender};
 use msg::constellation_msg::PipelineId;
 use serde_json::{self, Map, Number, Value};
 use std::cell::RefCell;
 use std::net::TcpStream;
+use time::precise_time_ns;
+use uuid::Uuid;
 
 trait EncodableConsoleMessage {
     fn encode(&self) -> serde_json::Result<String>;
@@ -34,9 +39,7 @@ impl EncodableConsoleMessage for CachedConsoleMessage {
 }
 
 #[derive(Serialize)]
-struct StartedListenersTraits {
-    customNetworkRequest: bool,
-}
+struct StartedListenersTraits;
 
 #[derive(Serialize)]
 struct StartedListenersReply {
@@ -72,8 +75,27 @@ struct EvaluateJSReply {
     result: Value,
     timestamp: u64,
     exception: Value,
-    exceptionMessage: String,
+    exceptionMessage: Value,
     helperResult: Value,
+}
+
+#[derive(Serialize)]
+struct EvaluateJSEvent {
+    from: String,
+    r#type: String,
+    input: String,
+    result: Value,
+    timestamp: u64,
+    resultID: String,
+    exception: Value,
+    exceptionMessage: Value,
+    helperResult: Value,
+}
+
+#[derive(Serialize)]
+struct EvaluateJSAsyncReply {
+    from: String,
+    resultID: String,
 }
 
 #[derive(Serialize)]
@@ -87,6 +109,139 @@ pub struct ConsoleActor {
     pub pipeline: PipelineId,
     pub script_chan: IpcSender<DevtoolScriptControlMsg>,
     pub streams: RefCell<Vec<TcpStream>>,
+    pub cached_events: RefCell<Vec<CachedConsoleMessage>>,
+}
+
+impl ConsoleActor {
+    fn evaluateJS(
+        &self,
+        registry: &ActorRegistry,
+        msg: &Map<String, Value>,
+    ) -> Result<EvaluateJSReply, ()> {
+        let input = msg.get("text").unwrap().as_str().unwrap().to_owned();
+        let (chan, port) = ipc::channel().unwrap();
+        self.script_chan
+            .send(DevtoolScriptControlMsg::EvaluateJS(
+                self.pipeline,
+                input.clone(),
+                chan,
+            ))
+            .unwrap();
+
+        //TODO: extract conversion into protocol module or some other useful place
+        let result = match port.recv().map_err(|_| ())? {
+            VoidValue => {
+                let mut m = Map::new();
+                m.insert("type".to_owned(), Value::String("undefined".to_owned()));
+                Value::Object(m)
+            },
+            NullValue => {
+                let mut m = Map::new();
+                m.insert("type".to_owned(), Value::String("null".to_owned()));
+                Value::Object(m)
+            },
+            BooleanValue(val) => Value::Bool(val),
+            NumberValue(val) => {
+                if val.is_nan() {
+                    let mut m = Map::new();
+                    m.insert("type".to_owned(), Value::String("NaN".to_owned()));
+                    Value::Object(m)
+                } else if val.is_infinite() {
+                    let mut m = Map::new();
+                    if val < 0. {
+                        m.insert("type".to_owned(), Value::String("-Infinity".to_owned()));
+                    } else {
+                        m.insert("type".to_owned(), Value::String("Infinity".to_owned()));
+                    }
+                    Value::Object(m)
+                } else if val == 0. && val.is_sign_negative() {
+                    let mut m = Map::new();
+                    m.insert("type".to_owned(), Value::String("-0".to_owned()));
+                    Value::Object(m)
+                } else {
+                    Value::Number(Number::from_f64(val).unwrap())
+                }
+            },
+            StringValue(s) => Value::String(s),
+            ActorValue { class, uuid } => {
+                //TODO: make initial ActorValue message include these properties?
+                let mut m = Map::new();
+                let actor = ObjectActor::new(registry, uuid);
+
+                m.insert("type".to_owned(), Value::String("object".to_owned()));
+                m.insert("class".to_owned(), Value::String(class));
+                m.insert("actor".to_owned(), Value::String(actor));
+                m.insert("extensible".to_owned(), Value::Bool(true));
+                m.insert("frozen".to_owned(), Value::Bool(false));
+                m.insert("sealed".to_owned(), Value::Bool(false));
+                Value::Object(m)
+            },
+        };
+
+        //TODO: catch and return exception values from JS evaluation
+        let reply = EvaluateJSReply {
+            from: self.name(),
+            input: input,
+            result: result,
+            timestamp: 0,
+            exception: Value::Null,
+            exceptionMessage: Value::Null,
+            helperResult: Value::Null,
+        };
+        std::result::Result::Ok(reply)
+    }
+
+    pub(crate) fn handle_page_error(&self, page_error: PageError) {
+        self.cached_events
+            .borrow_mut()
+            .push(CachedConsoleMessage::PageError(page_error.clone()));
+        let msg = PageErrorMsg {
+            from: self.name(),
+            type_: "pageError".to_owned(),
+            pageError: page_error,
+        };
+        for stream in &mut *self.streams.borrow_mut() {
+            stream.write_json_packet(&msg);
+        }
+    }
+
+    pub(crate) fn handle_console_api(&self, console_message: ConsoleMessage) {
+        let level = match console_message.logLevel {
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "error",
+            _ => "log",
+        }
+        .to_owned();
+        self.cached_events
+            .borrow_mut()
+            .push(CachedConsoleMessage::ConsoleAPI(ConsoleAPI {
+                type_: "ConsoleAPI".to_owned(),
+                level: level.clone(),
+                filename: console_message.filename.clone(),
+                lineNumber: console_message.lineNumber as u32,
+                functionName: "".to_string(), //TODO
+                timeStamp: precise_time_ns(),
+                private: false,
+                arguments: vec![console_message.message.clone()],
+            }));
+        let msg = ConsoleAPICall {
+            from: self.name(),
+            type_: "consoleAPICall".to_owned(),
+            message: ConsoleMsg {
+                level: level,
+                timeStamp: precise_time_ns(),
+                arguments: vec![console_message.message],
+                filename: console_message.filename,
+                lineNumber: console_message.lineNumber,
+                columnNumber: console_message.columnNumber,
+            },
+        };
+        for stream in &mut *self.streams.borrow_mut() {
+            stream.write_json_packet(&msg);
+        }
+    }
 }
 
 impl Actor for ConsoleActor {
@@ -120,24 +275,27 @@ impl Actor for ConsoleActor {
                         s => debug!("unrecognized message type requested: \"{}\"", s),
                     };
                 }
-                let (chan, port) = ipc::channel().unwrap();
-                self.script_chan
-                    .send(DevtoolScriptControlMsg::GetCachedMessages(
-                        self.pipeline,
-                        message_types,
-                        chan,
-                    ))
-                    .unwrap();
-                let messages = port
-                    .recv()
-                    .map_err(|_| ())?
-                    .into_iter()
-                    .map(|message| {
-                        let json_string = message.encode().unwrap();
+                let mut messages = vec![];
+                for event in self.cached_events.borrow().iter() {
+                    let include = match event {
+                        CachedConsoleMessage::PageError(_)
+                            if message_types.contains(CachedConsoleMessageTypes::PAGE_ERROR) =>
+                        {
+                            true
+                        },
+                        CachedConsoleMessage::ConsoleAPI(_)
+                            if message_types.contains(CachedConsoleMessageTypes::CONSOLE_API) =>
+                        {
+                            true
+                        },
+                        _ => false,
+                    };
+                    if include {
+                        let json_string = event.encode().unwrap();
                         let json = serde_json::from_str::<Value>(&json_string).unwrap();
-                        json.as_object().unwrap().to_owned()
-                    })
-                    .collect();
+                        messages.push(json.as_object().unwrap().to_owned())
+                    }
+                }
 
                 let msg = GetCachedMessagesReply {
                     from: self.name(),
@@ -149,13 +307,15 @@ impl Actor for ConsoleActor {
 
             "startListeners" => {
                 //TODO: actually implement listener filters that support starting/stopping
+                let listeners = msg.get("listeners").unwrap().as_array().unwrap().to_owned();
                 let msg = StartedListenersReply {
                     from: self.name(),
                     nativeConsoleAPI: true,
-                    startedListeners: vec!["PageError".to_owned(), "ConsoleAPI".to_owned()],
-                    traits: StartedListenersTraits {
-                        customNetworkRequest: true,
-                    },
+                    startedListeners: listeners
+                        .into_iter()
+                        .map(|s| s.as_str().unwrap().to_owned())
+                        .collect(),
+                    traits: StartedListenersTraits,
                 };
                 stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
@@ -191,76 +351,33 @@ impl Actor for ConsoleActor {
             },
 
             "evaluateJS" => {
-                let input = msg.get("text").unwrap().as_str().unwrap().to_owned();
-                let (chan, port) = ipc::channel().unwrap();
-                self.script_chan
-                    .send(DevtoolScriptControlMsg::EvaluateJS(
-                        self.pipeline,
-                        input.clone(),
-                        chan,
-                    ))
-                    .unwrap();
+                let msg = self.evaluateJS(&registry, &msg);
+                stream.write_json_packet(&msg);
+                ActorMessageStatus::Processed
+            },
 
-                //TODO: extract conversion into protocol module or some other useful place
-                let result = match port.recv().map_err(|_| ())? {
-                    VoidValue => {
-                        let mut m = Map::new();
-                        m.insert("type".to_owned(), Value::String("undefined".to_owned()));
-                        Value::Object(m)
-                    },
-                    NullValue => {
-                        let mut m = Map::new();
-                        m.insert("type".to_owned(), Value::String("null".to_owned()));
-                        Value::Object(m)
-                    },
-                    BooleanValue(val) => Value::Bool(val),
-                    NumberValue(val) => {
-                        if val.is_nan() {
-                            let mut m = Map::new();
-                            m.insert("type".to_owned(), Value::String("NaN".to_owned()));
-                            Value::Object(m)
-                        } else if val.is_infinite() {
-                            let mut m = Map::new();
-                            if val < 0. {
-                                m.insert("type".to_owned(), Value::String("-Infinity".to_owned()));
-                            } else {
-                                m.insert("type".to_owned(), Value::String("Infinity".to_owned()));
-                            }
-                            Value::Object(m)
-                        } else if val == 0. && val.is_sign_negative() {
-                            let mut m = Map::new();
-                            m.insert("type".to_owned(), Value::String("-0".to_owned()));
-                            Value::Object(m)
-                        } else {
-                            Value::Number(Number::from_f64(val).unwrap())
-                        }
-                    },
-                    StringValue(s) => Value::String(s),
-                    ActorValue { class, uuid } => {
-                        //TODO: make initial ActorValue message include these properties?
-                        let mut m = Map::new();
-                        let actor = ObjectActor::new(registry, uuid);
-
-                        m.insert("type".to_owned(), Value::String("object".to_owned()));
-                        m.insert("class".to_owned(), Value::String(class));
-                        m.insert("actor".to_owned(), Value::String(actor));
-                        m.insert("extensible".to_owned(), Value::Bool(true));
-                        m.insert("frozen".to_owned(), Value::Bool(false));
-                        m.insert("sealed".to_owned(), Value::Bool(false));
-                        Value::Object(m)
-                    },
-                };
-
-                //TODO: catch and return exception values from JS evaluation
-                let msg = EvaluateJSReply {
+            "evaluateJSAsync" => {
+                let resultID = Uuid::new_v4().to_string();
+                let early_reply = EvaluateJSAsyncReply {
                     from: self.name(),
-                    input: input,
-                    result: result,
-                    timestamp: 0,
-                    exception: Value::Object(Map::new()),
-                    exceptionMessage: "".to_owned(),
-                    helperResult: Value::Object(Map::new()),
+                    resultID: resultID.clone(),
                 };
+                // Emit an eager reply so that the client starts listening
+                // for an async event with the resultID
+                stream.write_json_packet(&early_reply);
+                let reply = self.evaluateJS(&registry, &msg).unwrap();
+                let msg = EvaluateJSEvent {
+                    from: self.name(),
+                    r#type: "evaluationResult".to_owned(),
+                    input: reply.input,
+                    result: reply.result,
+                    timestamp: reply.timestamp,
+                    resultID: resultID,
+                    exception: reply.exception,
+                    exceptionMessage: reply.exceptionMessage,
+                    helperResult: reply.helperResult,
+                };
+                // Send the data from evaluateJS along with a resultID
                 stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
             },

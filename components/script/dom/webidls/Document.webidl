@@ -8,8 +8,9 @@
  */
 
 // https://dom.spec.whatwg.org/#interface-document
-[Constructor]
+[Exposed=Window]
 interface Document : Node {
+  [Throws] constructor();
   [SameObject]
   readonly attribute DOMImplementation implementation;
   [Constant]
@@ -33,9 +34,10 @@ interface Document : Node {
   HTMLCollection getElementsByClassName(DOMString classNames);
 
   [CEReactions, NewObject, Throws]
-  Element createElement(DOMString localName, optional ElementCreationOptions options);
+  Element createElement(DOMString localName, optional (DOMString or ElementCreationOptions) options = {});
   [CEReactions, NewObject, Throws]
-  Element createElementNS(DOMString? namespace, DOMString qualifiedName, optional ElementCreationOptions options);
+  Element createElementNS(DOMString? namespace, DOMString qualifiedName,
+                          optional (DOMString or ElementCreationOptions) options = {});
   [NewObject]
   DocumentFragment createDocumentFragment();
   [NewObject]
@@ -72,8 +74,8 @@ interface Document : Node {
                               optional NodeFilter? filter = null);
 };
 
-Document implements NonElementParentNode;
-Document implements ParentNode;
+Document includes NonElementParentNode;
+Document includes ParentNode;
 
 enum DocumentReadyState { "loading", "interactive", "complete" };
 
@@ -122,7 +124,7 @@ partial /*sealed*/ interface Document {
   [CEReactions, Throws]
   Document open(optional DOMString unused1, optional DOMString unused2);
   [CEReactions, Throws]
-  WindowProxy open(DOMString url, DOMString name, DOMString features);
+  WindowProxy open(USVString url, DOMString name, DOMString features);
   [CEReactions, Throws]
   void close();
   [CEReactions, Throws]
@@ -132,7 +134,6 @@ partial /*sealed*/ interface Document {
 
   // user interaction
   readonly attribute Window?/*Proxy?*/ defaultView;
-  readonly attribute Element? activeElement;
   boolean hasFocus();
   // [CEReactions]
   // attribute DOMString designMode;
@@ -149,8 +150,8 @@ partial /*sealed*/ interface Document {
 
   // also has obsolete members
 };
-Document implements GlobalEventHandlers;
-Document implements DocumentAndElementEventHandlers;
+Document includes GlobalEventHandlers;
+Document includes DocumentAndElementEventHandlers;
 
 // https://html.spec.whatwg.org/multipage/#Document-partial
 partial interface Document {
@@ -199,17 +200,6 @@ partial interface Document {
       TouchList createTouchList(Touch... touches);
 };
 
-// https://drafts.csswg.org/cssom-view/#dom-document-elementfrompoint
-partial interface Document {
-  Element? elementFromPoint(double x, double y);
-  sequence<Element> elementsFromPoint(double x, double y);
-};
-
-// https://drafts.csswg.org/cssom/#extensions-to-the-document-interface
-partial interface Document {
-  [SameObject] readonly attribute StyleSheetList styleSheets;
-};
-
 // https://fullscreen.spec.whatwg.org/#api
 partial interface Document {
   [LenientSetter] readonly attribute boolean fullscreenEnabled;
@@ -220,4 +210,12 @@ partial interface Document {
 
   attribute EventHandler onfullscreenchange;
   attribute EventHandler onfullscreenerror;
+};
+
+Document includes DocumentOrShadowRoot;
+
+// Servo internal API.
+partial interface Document {
+  [Throws]
+  ShadowRoot servoGetMediaControls(DOMString id);
 };

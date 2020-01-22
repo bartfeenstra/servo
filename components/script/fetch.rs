@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::{enter_realm, InCompartment};
 use crate::dom::bindings::codegen::Bindings::RequestBinding::RequestInfo;
 use crate::dom::bindings::codegen::Bindings::RequestBinding::RequestInit;
 use crate::dom::bindings::codegen::Bindings::ResponseBinding::ResponseBinding::ResponseMethods;
@@ -19,14 +20,18 @@ use crate::dom::promise::Promise;
 use crate::dom::request::Request;
 use crate::dom::response::Response;
 use crate::dom::serviceworkerglobalscope::ServiceWorkerGlobalScope;
-use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
+use crate::network_listener::{
+    self, submit_timing_data, NetworkListener, PreInvoke, ResourceTimingListener,
+};
 use crate::task_source::TaskSourceName;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
-use js::jsapi::JSAutoCompartment;
-use net_traits::request::RequestBuilder;
+use net_traits::request::{
+    CorsSettings, CredentialsMode, Destination, RequestBuilder, RequestMode,
+};
 use net_traits::request::{Request as NetTraitsRequest, ServiceWorkersMode};
 use net_traits::CoreResourceMsg::Fetch as NetTraitsFetch;
+use net_traits::{CoreResourceMsg, CoreResourceThread, FetchResponseMsg};
 use net_traits::{FetchChannels, FetchResponseListener, NetworkError};
 use net_traits::{FetchMetadata, FilteredMetadata, Metadata};
 use net_traits::{ResourceFetchTiming, ResourceTimingType};
@@ -94,10 +99,6 @@ impl Drop for FetchCanceller {
     }
 }
 
-fn from_referrer_to_referrer_url(request: &NetTraitsRequest) -> Option<ServoUrl> {
-    request.referrer.to_url().map(|url| url.clone())
-}
-
 fn request_init_from_request(request: NetTraitsRequest) -> RequestBuilder {
     RequestBuilder {
         method: request.method.clone(),
@@ -118,27 +119,30 @@ fn request_init_from_request(request: NetTraitsRequest) -> RequestBuilder {
             .origin()
             .immutable()
             .clone(),
-        referrer_url: from_referrer_to_referrer_url(&request),
+        referrer: Some(request.referrer.clone()),
         referrer_policy: request.referrer_policy,
         pipeline_id: request.pipeline_id,
         redirect_mode: request.redirect_mode,
         integrity_metadata: "".to_owned(),
         url_list: vec![],
+        parser_metadata: request.parser_metadata,
+        initiator: request.initiator,
+        csp_list: None,
     }
 }
 
 // https://fetch.spec.whatwg.org/#fetch-method
-#[allow(unrooted_must_root)]
-#[allow(unsafe_code)]
+#[allow(unrooted_must_root, non_snake_case)]
 pub fn Fetch(
     global: &GlobalScope,
     input: RequestInfo,
     init: RootedTraceableBox<RequestInit>,
+    comp: InCompartment,
 ) -> Rc<Promise> {
     let core_resource_thread = global.core_resource_thread();
 
     // Step 1
-    let promise = unsafe { Promise::new_in_current_compartment(global) };
+    let promise = Promise::new_in_current_compartment(global, comp);
     let response = Response::new(global);
 
     // Step 2
@@ -152,6 +156,7 @@ pub fn Fetch(
     let timing_type = request.timing_type();
 
     let mut request_init = request_init_from_request(request);
+    request_init.csp_list = global.get_csp_list().clone();
 
     // Step 3
     if global.downcast::<ServiceWorkerGlobalScope>().is_some() {
@@ -210,10 +215,7 @@ impl FetchResponseListener for FetchContext {
             .expect("fetch promise is missing")
             .root();
 
-        // JSAutoCompartment needs to be manually made.
-        // Otherwise, Servo will crash.
-        let promise_cx = promise.global().get_cx();
-        let _ac = JSAutoCompartment::new(promise_cx, promise.reflector().get_jsobject().get());
+        let _ac = enter_realm(&*promise);
         match fetch_metadata {
             // Step 4.1
             Err(_) => {
@@ -239,14 +241,16 @@ impl FetchResponseListener for FetchContext {
                         fill_headers_with_metadata(self.response_object.root(), m);
                         self.response_object.root().set_type(DOMResponseType::Cors);
                     },
-                    FilteredMetadata::Opaque => self
-                        .response_object
-                        .root()
-                        .set_type(DOMResponseType::Opaque),
-                    FilteredMetadata::OpaqueRedirect => self
-                        .response_object
-                        .root()
-                        .set_type(DOMResponseType::Opaqueredirect),
+                    FilteredMetadata::Opaque => {
+                        self.response_object
+                            .root()
+                            .set_type(DOMResponseType::Opaque);
+                    },
+                    FilteredMetadata::OpaqueRedirect => {
+                        self.response_object
+                            .root()
+                            .set_type(DOMResponseType::Opaqueredirect);
+                    },
                 },
             },
         }
@@ -256,14 +260,13 @@ impl FetchResponseListener for FetchContext {
     }
 
     fn process_response_chunk(&mut self, mut chunk: Vec<u8>) {
+        self.response_object.root().stream_chunk(chunk.as_slice());
         self.body.append(&mut chunk);
     }
 
     fn process_response_eof(&mut self, _response: Result<ResourceFetchTiming, NetworkError>) {
         let response = self.response_object.root();
-        let global = response.global();
-        let cx = global.get_cx();
-        let _ac = JSAutoCompartment::new(cx, global.reflector().get_jsobject().get());
+        let _ac = enter_realm(&*response);
         response.finish(mem::replace(&mut self.body, vec![]));
         // TODO
         // ... trailerObject is not supported in Servo yet.
@@ -303,4 +306,70 @@ fn fill_headers_with_metadata(r: DomRoot<Response>, m: Metadata) {
     r.set_headers(m.headers);
     r.set_raw_status(m.status);
     r.set_final_url(m.final_url);
+}
+
+/// Convenience function for synchronously loading a whole resource.
+pub fn load_whole_resource(
+    request: RequestBuilder,
+    core_resource_thread: &CoreResourceThread,
+    global: &GlobalScope,
+) -> Result<(Metadata, Vec<u8>), NetworkError> {
+    let (action_sender, action_receiver) = ipc::channel().unwrap();
+    let url = request.url.clone();
+    core_resource_thread
+        .send(CoreResourceMsg::Fetch(
+            request,
+            FetchChannels::ResponseMsg(action_sender, None),
+        ))
+        .unwrap();
+
+    let mut buf = vec![];
+    let mut metadata = None;
+    loop {
+        match action_receiver.recv().unwrap() {
+            FetchResponseMsg::ProcessRequestBody | FetchResponseMsg::ProcessRequestEOF => (),
+            FetchResponseMsg::ProcessResponse(Ok(m)) => {
+                metadata = Some(match m {
+                    FetchMetadata::Unfiltered(m) => m,
+                    FetchMetadata::Filtered { unsafe_, .. } => unsafe_,
+                })
+            },
+            FetchResponseMsg::ProcessResponseChunk(data) => buf.extend_from_slice(&data),
+            FetchResponseMsg::ProcessResponseEOF(Ok(_)) => {
+                let metadata = metadata.unwrap();
+                if let Some(timing) = &metadata.timing {
+                    submit_timing_data(global, url, InitiatorType::Other, &timing);
+                }
+                return Ok((metadata, buf));
+            },
+            FetchResponseMsg::ProcessResponse(Err(e)) |
+            FetchResponseMsg::ProcessResponseEOF(Err(e)) => return Err(e),
+        }
+    }
+}
+
+/// https://html.spec.whatwg.org/multipage/#create-a-potential-cors-request
+pub(crate) fn create_a_potential_cors_request(
+    url: ServoUrl,
+    destination: Destination,
+    cors_setting: Option<CorsSettings>,
+    same_origin_fallback: Option<bool>,
+) -> RequestBuilder {
+    RequestBuilder::new(url)
+        // https://html.spec.whatwg.org/multipage/#create-a-potential-cors-request
+        // Step 1
+        .mode(match cors_setting {
+            Some(_) => RequestMode::CorsMode,
+            None if same_origin_fallback == Some(true) => RequestMode::SameOrigin,
+            None => RequestMode::NoCors,
+        })
+        // https://html.spec.whatwg.org/multipage/#create-a-potential-cors-request
+        // Step 3-4
+        .credentials_mode(match cors_setting {
+            Some(CorsSettings::Anonymous) => CredentialsMode::CredentialsSameOrigin,
+            _ => CredentialsMode::Include,
+        })
+        // Step 5
+        .destination(destination)
+        .use_url_credentials(true)
 }

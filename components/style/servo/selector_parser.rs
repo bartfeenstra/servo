@@ -66,10 +66,6 @@ pub const PSEUDO_COUNT: usize = PseudoElement::ServoInlineAbsolute as usize + 1;
 
 impl ::selectors::parser::PseudoElement for PseudoElement {
     type Impl = SelectorImpl;
-
-    fn supports_pseudo_class(&self, _: &NonTSPseudoClass) -> bool {
-        false
-    }
 }
 
 impl ToCss for PseudoElement {
@@ -147,6 +143,12 @@ impl PseudoElement {
         false
     }
 
+    /// Whether this pseudo-element is the ::selection pseudo.
+    #[inline]
+    pub fn is_selection(&self) -> bool {
+        *self == PseudoElement::Selection
+    }
+
     /// Whether this pseudo-element is the ::before pseudo.
     #[inline]
     pub fn is_before(&self) -> bool {
@@ -168,6 +170,12 @@ impl PseudoElement {
     /// Whether the current pseudo element is :first-line
     #[inline]
     pub fn is_first_line(&self) -> bool {
+        false
+    }
+
+    /// Whether this pseudo-element is the ::-moz-color-swatch pseudo.
+    #[inline]
+    pub fn is_color_swatch(&self) -> bool {
         false
     }
 
@@ -282,7 +290,6 @@ pub enum NonTSPseudoClass {
     ReadWrite,
     ReadOnly,
     ServoNonZeroBorder,
-    ServoCaseSensitiveTypeAttr(Atom),
     Target,
     Visited,
 }
@@ -294,6 +301,19 @@ impl ::selectors::parser::NonTSPseudoClass for NonTSPseudoClass {
     fn is_active_or_hover(&self) -> bool {
         matches!(*self, NonTSPseudoClass::Active | NonTSPseudoClass::Hover)
     }
+
+    #[inline]
+    fn is_user_action_state(&self) -> bool {
+        matches!(
+            *self,
+            NonTSPseudoClass::Active | NonTSPseudoClass::Hover | NonTSPseudoClass::Focus
+        )
+    }
+
+    #[inline]
+    fn has_zero_specificity(&self) -> bool {
+        false
+    }
 }
 
 impl ToCss for NonTSPseudoClass {
@@ -302,18 +322,10 @@ impl ToCss for NonTSPseudoClass {
         W: fmt::Write,
     {
         use self::NonTSPseudoClass::*;
-        match *self {
-            Lang(ref lang) => {
-                dest.write_str(":lang(")?;
-                serialize_identifier(lang, dest)?;
-                return dest.write_str(")");
-            },
-            ServoCaseSensitiveTypeAttr(ref value) => {
-                dest.write_str(":-servo-case-sensitive-type-attr(")?;
-                serialize_identifier(value, dest)?;
-                return dest.write_str(")");
-            },
-            _ => {},
+        if let Lang(ref lang) = *self {
+            dest.write_str(":lang(")?;
+            serialize_identifier(lang, dest)?;
+            return dest.write_str(")");
         }
 
         dest.write_str(match *self {
@@ -333,7 +345,7 @@ impl ToCss for NonTSPseudoClass {
             ServoNonZeroBorder => ":-servo-nonzero-border",
             Target => ":target",
             Visited => ":visited",
-            Lang(_) | ServoCaseSensitiveTypeAttr(_) => unreachable!(),
+            Lang(_) => unreachable!(),
         })
     }
 }
@@ -367,12 +379,7 @@ impl NonTSPseudoClass {
             PlaceholderShown => ElementState::IN_PLACEHOLDER_SHOWN_STATE,
             Target => ElementState::IN_TARGET_STATE,
 
-            AnyLink |
-            Lang(_) |
-            Link |
-            Visited |
-            ServoNonZeroBorder |
-            ServoCaseSensitiveTypeAttr(_) => ElementState::empty(),
+            AnyLink | Lang(_) | Link | Visited | ServoNonZeroBorder => ElementState::empty(),
         }
     }
 
@@ -407,6 +414,7 @@ impl ::selectors::SelectorImpl for SelectorImpl {
     type AttrValue = String;
     type Identifier = Atom;
     type ClassName = Atom;
+    type PartName = Atom;
     type LocalName = LocalName;
     type NamespacePrefix = Prefix;
     type NamespaceUrl = Namespace;
@@ -463,14 +471,8 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
         let pseudo_class = match_ignore_ascii_case! { &name,
             "lang" => {
                 Lang(parser.expect_ident_or_string()?.as_ref().into())
-            }
-            "-servo-case-sensitive-type-attr" => {
-                if !self.in_user_agent_stylesheet() {
-                    return Err(parser.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())));
-                }
-                ServoCaseSensitiveTypeAttr(Atom::from(parser.expect_ident()?.as_ref()))
-            }
-            _ => return Err(parser.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
+            },
+            _ => return Err(parser.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone()))),
         };
 
         Ok(pseudo_class)
@@ -697,6 +699,18 @@ impl ElementSnapshot for ServoElementSnapshot {
     fn id_attr(&self) -> Option<&Atom> {
         self.get_attr(&ns!(), &local_name!("id"))
             .map(|v| v.as_atom())
+    }
+
+    fn is_part(&self, _name: &Atom) -> bool {
+        false
+    }
+
+    fn exported_part(&self, _: &Atom) -> Option<Atom> {
+        None
+    }
+
+    fn imported_part(&self, _: &Atom) -> Option<Atom> {
+        None
     }
 
     fn has_class(&self, name: &Atom, case_sensitivity: CaseSensitivity) -> bool {

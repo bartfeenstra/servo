@@ -12,7 +12,7 @@ use crate::flow::{Flow, FlowClass, FragmentationContext, GetBaseFlow, OpaqueFlow
 use crate::fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
 use crate::ServoArc;
 use app_units::Au;
-use euclid::{Point2D, Vector2D};
+use euclid::default::{Point2D, Vector2D};
 use gfx_traits::print_tree::PrintTree;
 use std::cmp::{max, min};
 use std::fmt;
@@ -74,10 +74,6 @@ impl Flow for MulticolFlow {
         &self.block_flow
     }
 
-    fn as_mut_multicol(&mut self) -> &mut MulticolFlow {
-        self
-    }
-
     fn bubble_inline_sizes(&mut self) {
         // FIXME(SimonSapin) http://dev.w3.org/csswg/css-sizing/#multicol-intrinsic
         self.block_flow.bubble_inline_sizes();
@@ -106,14 +102,14 @@ impl Flow for MulticolFlow {
         let column_width;
         {
             let style = &self.block_flow.fragment.style;
-            let column_gap = match style.get_position().column_gap {
-                NonNegativeLengthPercentageOrNormal::LengthPercentage(len) => {
-                    len.0.to_pixel_length(content_inline_size).into()
+            let column_gap = Au::from(match style.get_position().column_gap {
+                NonNegativeLengthPercentageOrNormal::LengthPercentage(ref len) => {
+                    len.0.to_pixel_length(content_inline_size)
                 },
                 NonNegativeLengthPercentageOrNormal::Normal => {
                     self.block_flow.fragment.style.get_font().font_size.size()
                 },
-            };
+            });
 
             let column_style = style.get_column();
             let mut column_count;

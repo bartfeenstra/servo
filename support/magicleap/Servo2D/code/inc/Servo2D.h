@@ -2,10 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#include <GLES/gl.h>
 #include <lumin/LandscapeApp.h>
 #include <lumin/Prism.h>
 #include <lumin/event/ServerEvent.h>
+#include <SceneDescriptor.h>
+#include <PrismSceneManager.h>
+
+#include <GLES/gl.h>
 #include <lumin/event/GestureInputEventData.h>
 #include <lumin/event/KeyInputEventData.h>
 #include <lumin/event/ControlTouchPadInputEventData.h>
@@ -17,7 +20,6 @@
 #include <lumin/ui/node/UiButton.h>
 #include <lumin/ui/node/UiPanel.h>
 #include <lumin/ui/node/UiTextEdit.h>
-#include <SceneDescriptor.h>
 
 typedef struct Opaque ServoInstance;
 
@@ -29,7 +31,7 @@ public:
   /**
    * Constructs the Landscape Application.
    */
-  Servo2D();
+  Servo2D(const char* uri, const char* args);
 
   /**
    * Destroys the Landscape Application.
@@ -85,25 +87,20 @@ protected:
   int deInit() override;
 
   /**
-   * Returns the size of the Prism, default = +/- (1.0f, 1.0f, 1.0f) meters.
+   * Returns the initial size of the Prism
    * Used in createPrism().
    */
-  const glm::vec3 getInitialPrismExtents() const;
+  const glm::vec3 getInitialPrismSize() const;
 
   /**
    * Creates the prism, updates the private variable prism_ with the created prism.
    */
-  int createInitialPrism();
+  void createInitialPrism();
 
   /**
    * Initializes and creates the scene of all scenes marked as initially instanced
    */
-  void instanceInitialScenes();
-
-  /**
-   * Initializes and creates the scene of the scene and instances it into the prism
-   */
-  lumin::Node* instanceScene(const SceneDescriptor & sceneToInit);
+  void spawnInitialScenes();
 
   /**
    * Run application login
@@ -127,12 +124,14 @@ protected:
   bool pointInsideViewport(glm::vec2 pt);
 
   /**
-   * Redraw the laser. Returns the laser endpoint, in viewport coordinates.
+   * Returns the intersection of the laser and the viewport, in viewport coordinates.
+   * Returns (-1, -1) if the laser does not intersect the viewport.
    */
-  glm::vec2 redrawLaser();
+  glm::vec2 laserPosition();
 
 private:
   lumin::Prism* prism_ = nullptr;  // represents the bounded space where the App renders.
+  PrismSceneManager* prismSceneManager_ = nullptr;
   lumin::PlanarResource* plane_ = nullptr; // the plane we're rendering into
   lumin::QuadNode* content_node_ = nullptr; // the node containing the plane
   lumin::ui::UiPanel* content_panel_ = nullptr; // the panel containing the node
@@ -144,4 +143,6 @@ private:
   glm::quat controller_orientation_; // The last recorded orientation of the controller (in world coords)
   bool controller_trigger_down_ = false; // Is the controller trigger currently down?
   ServoInstance* servo_ = nullptr; // the servo instance we're embedding
+  const char* uri_ = nullptr;
+  const char* args_ = nullptr;
 };

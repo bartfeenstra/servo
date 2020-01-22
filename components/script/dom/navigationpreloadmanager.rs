@@ -1,7 +1,8 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::InCompartment;
 use crate::dom::bindings::codegen::Bindings::NavigationPreloadManagerBinding::NavigationPreloadState;
 use crate::dom::bindings::codegen::Bindings::NavigationPreloadManagerBinding::{
     NavigationPreloadManagerMethods, Wrap,
@@ -43,9 +44,8 @@ impl NavigationPreloadManager {
 
 impl NavigationPreloadManagerMethods for NavigationPreloadManager {
     // https://w3c.github.io/ServiceWorker/#navigation-preload-manager-enable
-    #[allow(unsafe_code)]
-    fn Enable(&self) -> Rc<Promise> {
-        let promise = unsafe { Promise::new_in_current_compartment(&*self.global()) };
+    fn Enable(&self, comp: InCompartment) -> Rc<Promise> {
+        let promise = Promise::new_in_current_compartment(&*self.global(), comp);
 
         // 2.
         if self.serviceworker_registration.active().is_none() {
@@ -66,9 +66,8 @@ impl NavigationPreloadManagerMethods for NavigationPreloadManager {
     }
 
     // https://w3c.github.io/ServiceWorker/#navigation-preload-manager-disable
-    #[allow(unsafe_code)]
-    fn Disable(&self) -> Rc<Promise> {
-        let promise = unsafe { Promise::new_in_current_compartment(&*self.global()) };
+    fn Disable(&self, comp: InCompartment) -> Rc<Promise> {
+        let promise = Promise::new_in_current_compartment(&*self.global(), comp);
 
         // 2.
         if self.serviceworker_registration.active().is_none() {
@@ -89,9 +88,8 @@ impl NavigationPreloadManagerMethods for NavigationPreloadManager {
     }
 
     // https://w3c.github.io/ServiceWorker/#navigation-preload-manager-setheadervalue
-    #[allow(unsafe_code)]
-    fn SetHeaderValue(&self, value: ByteString) -> Rc<Promise> {
-        let promise = unsafe { Promise::new_in_current_compartment(&*self.global()) };
+    fn SetHeaderValue(&self, value: ByteString, comp: InCompartment) -> Rc<Promise> {
+        let promise = Promise::new_in_current_compartment(&*self.global(), comp);
 
         // 2.
         if self.serviceworker_registration.active().is_none() {
@@ -112,9 +110,8 @@ impl NavigationPreloadManagerMethods for NavigationPreloadManager {
     }
 
     // https://w3c.github.io/ServiceWorker/#navigation-preload-manager-getstate
-    #[allow(unsafe_code)]
-    fn GetState(&self) -> Rc<Promise> {
-        let promise = unsafe { Promise::new_in_current_compartment(&*self.global()) };
+    fn GetState(&self, comp: InCompartment) -> Rc<Promise> {
+        let promise = Promise::new_in_current_compartment(&*self.global(), comp);
         // 2.
         let mut state = NavigationPreloadState::empty();
 

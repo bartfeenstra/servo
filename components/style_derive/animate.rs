@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use darling::util::IdentList;
+use darling::util::PathList;
 use derive_common::cg;
 use proc_macro2::TokenStream;
 use quote::TokenStreamExt;
@@ -14,7 +14,7 @@ pub fn derive(mut input: DeriveInput) -> TokenStream {
     let no_bound = animation_input_attrs.no_bound.unwrap_or_default();
     let mut where_clause = input.generics.where_clause.take();
     for param in input.generics.type_params() {
-        if !no_bound.contains(&param.ident) {
+        if !no_bound.iter().any(|name| name.is_ident(&param.ident)) {
             cg::add_predicate(
                 &mut where_clause,
                 parse_quote!(#param: crate::values::animated::Animate),
@@ -25,7 +25,7 @@ pub fn derive(mut input: DeriveInput) -> TokenStream {
         let s = Structure::new(&input);
         let mut append_error_clause = s.variants().len() > 1;
 
-        let mut match_body = s.variants().iter().fold(quote!(), |body, variant| {
+        let match_body = s.variants().iter().fold(quote!(), |body, variant| {
             let arm = match derive_variant_arm(variant, &mut where_clause) {
                 Ok(arm) => arm,
                 Err(()) => {
@@ -124,7 +124,7 @@ struct AnimateInputAttrs {
 #[darling(attributes(animation), default)]
 #[derive(Default, FromDeriveInput)]
 pub struct AnimationInputAttrs {
-    pub no_bound: Option<IdentList>,
+    pub no_bound: Option<PathList>,
 }
 
 #[darling(attributes(animation), default)]
@@ -133,7 +133,7 @@ pub struct AnimationVariantAttrs {
     pub error: bool,
     // Only here because of structs, where the struct definition acts as a
     // variant itself.
-    pub no_bound: Option<IdentList>,
+    pub no_bound: Option<PathList>,
 }
 
 #[darling(attributes(animation), default)]

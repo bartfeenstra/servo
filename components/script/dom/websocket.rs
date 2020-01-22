@@ -14,7 +14,7 @@ use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::{is_token, DOMString, USVString};
-use crate::dom::blob::{Blob, BlobImpl};
+use crate::dom::blob::Blob;
 use crate::dom::closeevent::CloseEvent;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
@@ -27,20 +27,21 @@ use crate::task_source::websocket::WebsocketTaskSource;
 use crate::task_source::TaskSource;
 use dom_struct::dom_struct;
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
-use js::jsapi::{JSAutoCompartment, JSObject};
+use ipc_channel::router::ROUTER;
+use js::jsapi::{JSAutoRealm, JSObject};
 use js::jsval::UndefinedValue;
 use js::rust::CustomAutoRooterGuard;
 use js::typedarray::{ArrayBuffer, ArrayBufferView, CreateWith};
-use net_traits::request::{RequestBuilder, RequestMode};
+use net_traits::request::{Referrer, RequestBuilder, RequestMode};
 use net_traits::MessageData;
 use net_traits::{CoreResourceMsg, FetchChannels};
 use net_traits::{WebSocketDomAction, WebSocketNetworkEvent};
 use profile_traits::ipc as ProfiledIpc;
+use script_traits::serializable::BlobImpl;
 use servo_url::{ImmutableOrigin, ServoUrl};
 use std::borrow::ToOwned;
 use std::cell::Cell;
 use std::ptr;
-use std::thread;
 
 #[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf, PartialEq)]
 enum WebSocketRequestState {
@@ -142,6 +143,7 @@ impl WebSocket {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-websocket>
+    #[allow(non_snake_case)]
     pub fn Constructor(
         global: &GlobalScope,
         url: DOMString,
@@ -203,7 +205,8 @@ impl WebSocket {
         // Step 8.
         let request = RequestBuilder::new(url_record)
             .origin(global.origin().immutable().clone())
-            .mode(RequestMode::WebSocket { protocols });
+            .mode(RequestMode::WebSocket { protocols })
+            .referrer(Some(Referrer::NoReferrer));
 
         let channels = FetchChannels::WebSocket {
             event_sender: resource_event_sender,
@@ -215,42 +218,41 @@ impl WebSocket {
 
         let task_source = global.websocket_task_source();
         let canceller = global.task_canceller(WebsocketTaskSource::NAME);
-        thread::spawn(move || {
-            while let Ok(event) = dom_event_receiver.recv() {
-                match event {
-                    WebSocketNetworkEvent::ConnectionEstablished { protocol_in_use } => {
-                        let open_thread = ConnectionEstablishedTask {
-                            address: address.clone(),
-                            protocol_in_use,
-                        };
-                        task_source
-                            .queue_with_canceller(open_thread, &canceller)
-                            .unwrap();
-                    },
-                    WebSocketNetworkEvent::MessageReceived(message) => {
-                        let message_thread = MessageReceivedTask {
-                            address: address.clone(),
-                            message: message,
-                        };
-                        task_source
-                            .queue_with_canceller(message_thread, &canceller)
-                            .unwrap();
-                    },
-                    WebSocketNetworkEvent::Fail => {
-                        fail_the_websocket_connection(address.clone(), &task_source, &canceller);
-                    },
-                    WebSocketNetworkEvent::Close(code, reason) => {
-                        close_the_websocket_connection(
-                            address.clone(),
-                            &task_source,
-                            &canceller,
-                            code,
-                            reason,
-                        );
-                    },
-                }
-            }
-        });
+        ROUTER.add_route(
+            dom_event_receiver.to_opaque(),
+            Box::new(move |message| match message.to().unwrap() {
+                WebSocketNetworkEvent::ConnectionEstablished { protocol_in_use } => {
+                    let open_thread = ConnectionEstablishedTask {
+                        address: address.clone(),
+                        protocol_in_use,
+                    };
+                    task_source
+                        .queue_with_canceller(open_thread, &canceller)
+                        .unwrap();
+                },
+                WebSocketNetworkEvent::MessageReceived(message) => {
+                    let message_thread = MessageReceivedTask {
+                        address: address.clone(),
+                        message: message,
+                    };
+                    task_source
+                        .queue_with_canceller(message_thread, &canceller)
+                        .unwrap();
+                },
+                WebSocketNetworkEvent::Fail => {
+                    fail_the_websocket_connection(address.clone(), &task_source, &canceller);
+                },
+                WebSocketNetworkEvent::Close(code, reason) => {
+                    close_the_websocket_connection(
+                        address.clone(),
+                        &task_source,
+                        &canceller,
+                        code,
+                        reason,
+                    );
+                },
+            }),
+        );
 
         // Step 7.
         Ok(ws)
@@ -569,26 +571,26 @@ impl TaskOnce for MessageReceivedTask {
         // global.get_cx() returns a valid `JSContext` pointer, so this is safe.
         unsafe {
             let cx = global.get_cx();
-            let _ac = JSAutoCompartment::new(cx, ws.reflector().get_jsobject().get());
-            rooted!(in(cx) let mut message = UndefinedValue());
+            let _ac = JSAutoRealm::new(*cx, ws.reflector().get_jsobject().get());
+            rooted!(in(*cx) let mut message = UndefinedValue());
             match self.message {
-                MessageData::Text(text) => text.to_jsval(cx, message.handle_mut()),
+                MessageData::Text(text) => text.to_jsval(*cx, message.handle_mut()),
                 MessageData::Binary(data) => match ws.binary_type.get() {
                     BinaryType::Blob => {
                         let blob =
-                            Blob::new(&global, BlobImpl::new_from_bytes(data), "".to_owned());
-                        blob.to_jsval(cx, message.handle_mut());
+                            Blob::new(&global, BlobImpl::new_from_bytes(data, "".to_owned()));
+                        blob.to_jsval(*cx, message.handle_mut());
                     },
                     BinaryType::Arraybuffer => {
-                        rooted!(in(cx) let mut array_buffer = ptr::null_mut::<JSObject>());
+                        rooted!(in(*cx) let mut array_buffer = ptr::null_mut::<JSObject>());
                         assert!(ArrayBuffer::create(
-                            cx,
+                            *cx,
                             CreateWith::Slice(&data),
                             array_buffer.handle_mut()
                         )
                         .is_ok());
 
-                        (*array_buffer).to_jsval(cx, message.handle_mut());
+                        (*array_buffer).to_jsval(*cx, message.handle_mut());
                     },
                 },
             }
@@ -598,6 +600,7 @@ impl TaskOnce for MessageReceivedTask {
                 message.handle(),
                 Some(&ws.origin().ascii_serialization()),
                 None,
+                vec![],
             );
         }
     }

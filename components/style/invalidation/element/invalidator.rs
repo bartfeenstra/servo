@@ -11,6 +11,7 @@ use crate::selector_parser::SelectorImpl;
 use selectors::matching::matches_compound_selector_from;
 use selectors::matching::{CompoundSelectorMatchingResult, MatchingContext};
 use selectors::parser::{Combinator, Component, Selector};
+use selectors::OpaqueElement;
 use smallvec::SmallVec;
 use std::fmt;
 
@@ -28,7 +29,7 @@ where
 
     /// Whether the invalidation processor only cares about light-tree
     /// descendants of a given element, that is, doesn't invalidate
-    /// pseudo-elements, NAC, or XBL anon content.
+    /// pseudo-elements, NAC, shadow dom...
     fn light_tree_only(&self) -> bool {
         false
     }
@@ -72,11 +73,15 @@ pub struct DescendantInvalidationLists<'a> {
     pub dom_descendants: InvalidationVector<'a>,
     /// Invalidations for slotted children of an element.
     pub slotted_descendants: InvalidationVector<'a>,
+    /// Invalidations for ::part()s of an element.
+    pub parts: InvalidationVector<'a>,
 }
 
 impl<'a> DescendantInvalidationLists<'a> {
     fn is_empty(&self) -> bool {
-        self.dom_descendants.is_empty() && self.slotted_descendants.is_empty()
+        self.dom_descendants.is_empty() &&
+            self.slotted_descendants.is_empty() &&
+            self.parts.is_empty()
     }
 }
 
@@ -104,6 +109,8 @@ enum DescendantInvalidationKind {
     Dom,
     /// A ::slotted() descendant invalidation.
     Slotted,
+    /// A ::part() descendant invalidation.
+    Part,
 }
 
 /// The kind of invalidation we're processing.
@@ -121,6 +128,12 @@ enum InvalidationKind {
 #[derive(Clone)]
 pub struct Invalidation<'a> {
     selector: &'a Selector<SelectorImpl>,
+    /// The right shadow host from where the rule came from, if any.
+    ///
+    /// This is needed to ensure that we match the selector with the right
+    /// state, as whether some selectors like :host and ::part() match depends
+    /// on it.
+    scope: Option<OpaqueElement>,
     /// The offset of the selector pointing to a compound selector.
     ///
     /// This order is a "parse order" offset, that is, zero is the leftmost part
@@ -137,9 +150,14 @@ pub struct Invalidation<'a> {
 
 impl<'a> Invalidation<'a> {
     /// Create a new invalidation for a given selector and offset.
-    pub fn new(selector: &'a Selector<SelectorImpl>, offset: usize) -> Self {
+    pub fn new(
+        selector: &'a Selector<SelectorImpl>,
+        scope: Option<OpaqueElement>,
+        offset: usize,
+    ) -> Self {
         Self {
             selector,
+            scope,
             offset,
             matched_by_any_previous: false,
         }
@@ -158,7 +176,10 @@ impl<'a> Invalidation<'a> {
         // We should be able to do better here!
         match self.selector.combinator_at_parse_order(self.offset - 1) {
             Combinator::Descendant | Combinator::LaterSibling | Combinator::PseudoElement => true,
-            Combinator::SlotAssignment | Combinator::NextSibling | Combinator::Child => false,
+            Combinator::Part |
+            Combinator::SlotAssignment |
+            Combinator::NextSibling |
+            Combinator::Child => false,
         }
     }
 
@@ -171,6 +192,7 @@ impl<'a> Invalidation<'a> {
             Combinator::Child | Combinator::Descendant | Combinator::PseudoElement => {
                 InvalidationKind::Descendant(DescendantInvalidationKind::Dom)
             },
+            Combinator::Part => InvalidationKind::Descendant(DescendantInvalidationKind::Part),
             Combinator::SlotAssignment => {
                 InvalidationKind::Descendant(DescendantInvalidationKind::Slotted)
             },
@@ -445,11 +467,6 @@ where
 
         let mut sibling_invalidations = InvalidationVector::new();
         for child in parent.dom_children() {
-            // TODO(emilio): We handle <xbl:children> fine, because they appear
-            // in selector-matching (note bug 1374247, though).
-            //
-            // This probably needs a shadow root check on `child` here, and
-            // recursing if that's the case.
             let child = match child.as_element() {
                 Some(e) => e,
                 None => continue,
@@ -464,6 +481,60 @@ where
         }
 
         any_descendant
+    }
+
+    fn invalidate_parts_in_shadow_tree(
+        &mut self,
+        shadow: <E::ConcreteNode as TNode>::ConcreteShadowRoot,
+        invalidations: &[Invalidation<'b>],
+    ) -> bool {
+        debug_assert!(!invalidations.is_empty());
+
+        let mut any = false;
+        let mut sibling_invalidations = InvalidationVector::new();
+
+        for node in shadow.as_node().dom_descendants() {
+            let element = match node.as_element() {
+                Some(e) => e,
+                None => continue,
+            };
+
+            if element.has_part_attr() {
+                any |= self.invalidate_child(
+                    element,
+                    invalidations,
+                    &mut sibling_invalidations,
+                    DescendantInvalidationKind::Part,
+                );
+                debug_assert!(
+                    sibling_invalidations.is_empty(),
+                    "::part() shouldn't have sibling combinators to the right, \
+                     this makes no sense! {:?}",
+                    sibling_invalidations
+                );
+            }
+
+            if let Some(shadow) = element.shadow_root() {
+                if element.exports_any_part() {
+                    any |= self.invalidate_parts_in_shadow_tree(shadow, invalidations)
+                }
+            }
+        }
+
+        any
+    }
+
+    fn invalidate_parts(&mut self, invalidations: &[Invalidation<'b>]) -> bool {
+        if invalidations.is_empty() {
+            return false;
+        }
+
+        let shadow = match self.element.shadow_root() {
+            Some(s) => s,
+            None => return false,
+        };
+
+        self.invalidate_parts_in_shadow_tree(shadow, invalidations)
     }
 
     fn invalidate_slotted_elements(&mut self, invalidations: &[Invalidation<'b>]) -> bool {
@@ -535,13 +606,6 @@ where
             any_descendant |= self.invalidate_dom_descendants_of(root.as_node(), invalidations);
         }
 
-        // This is needed for XBL (technically) unconditionally, because XBL
-        // bindings do not block combinators in any way. However this is kinda
-        // broken anyway, since we should be looking at XBL rules too.
-        if let Some(anon_content) = self.element.xbl_binding_anonymous_content() {
-            any_descendant |= self.invalidate_dom_descendants_of(anon_content, invalidations);
-        }
-
         if let Some(marker) = self.element.marker_pseudo_element() {
             any_descendant |= self.invalidate_pseudo_element_or_nac(marker, invalidations);
         }
@@ -592,6 +656,7 @@ where
 
         any_descendant |= self.invalidate_non_slotted_descendants(&invalidations.dom_descendants);
         any_descendant |= self.invalidate_slotted_elements(&invalidations.slotted_descendants);
+        any_descendant |= self.invalidate_parts(&invalidations.parts);
 
         any_descendant
     }
@@ -633,7 +698,7 @@ where
             }
         }
 
-        sibling_invalidations.extend(new_sibling_invalidations.drain());
+        sibling_invalidations.extend(new_sibling_invalidations.drain(..));
         invalidated_self
     }
 
@@ -666,7 +731,7 @@ where
                 debug_assert_eq!(
                     descendant_invalidation_kind,
                     DescendantInvalidationKind::Dom,
-                    "Slotted invalidations don't propagate."
+                    "Slotted or part invalidations don't propagate."
                 );
                 descendant_invalidations.dom_descendants.push(invalidation);
             }
@@ -693,12 +758,17 @@ where
             self.element, invalidation, invalidation_kind
         );
 
-        let matching_result = matches_compound_selector_from(
-            &invalidation.selector,
-            invalidation.offset,
-            self.processor.matching_context(),
-            &self.element,
-        );
+        let matching_result = {
+            let context = self.processor.matching_context();
+            context.current_host = invalidation.scope;
+
+            matches_compound_selector_from(
+                &invalidation.selector,
+                invalidation.offset,
+                context,
+                &self.element,
+            )
+        };
 
         let mut invalidated_self = false;
         let mut matched = false;
@@ -763,11 +833,25 @@ where
                         if pseudo.is_marker() && self.element.marker_pseudo_element().is_none() {
                             invalidated_self = true;
                         }
+
+                        // FIXME: ::selection doesn't generate elements, so the
+                        // regular invalidation doesn't work for it. We store
+                        // the cached selection style holding off the originating
+                        // element, so we need to restyle it in order to invalidate
+                        // it. This is still not quite correct, since nothing
+                        // triggers a repaint necessarily, but matches old Gecko
+                        // behavior, and the ::selection implementation needs to
+                        // change significantly anyway to implement
+                        // https://github.com/w3c/csswg-drafts/issues/2474.
+                        if pseudo.is_selection() {
+                            invalidated_self = true;
+                        }
                     }
                 }
 
                 let next_invalidation = Invalidation {
                     selector: invalidation.selector,
+                    scope: invalidation.scope,
                     offset: next_combinator_offset + 1,
                     matched_by_any_previous: false,
                 };
@@ -853,6 +937,9 @@ where
                             descendant_invalidations
                                 .dom_descendants
                                 .push(next_invalidation);
+                        },
+                        InvalidationKind::Descendant(DescendantInvalidationKind::Part) => {
+                            descendant_invalidations.parts.push(next_invalidation);
                         },
                         InvalidationKind::Descendant(DescendantInvalidationKind::Slotted) => {
                             descendant_invalidations

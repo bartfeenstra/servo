@@ -18,7 +18,7 @@ use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::{is_token, ByteString, DOMString, USVString};
-use crate::dom::blob::{Blob, BlobImpl};
+use crate::dom::blob::{normalize_type_string, Blob};
 use crate::dom::document::DocumentSource;
 use crate::dom::document::{Document, HasBrowsingContext, IsHTMLDocument};
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
@@ -38,14 +38,14 @@ use crate::dom::xmlhttprequesteventtarget::XMLHttpRequestEventTarget;
 use crate::dom::xmlhttprequestupload::XMLHttpRequestUpload;
 use crate::fetch::FetchCanceller;
 use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
+use crate::script_runtime::JSContext;
 use crate::task_source::networking::NetworkingTaskSource;
 use crate::task_source::TaskSourceName;
 use crate::timers::{OneshotTimerCallback, OneshotTimerHandle};
 use dom_struct::dom_struct;
 use encoding_rs::{Encoding, UTF_8};
 use euclid::Length;
-use headers_core::HeaderMapExt;
-use headers_ext::{ContentLength, ContentType};
+use headers::{ContentLength, ContentType, HeaderMapExt};
 use html5ever::serialize;
 use html5ever::serialize::SerializeOpts;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
@@ -54,17 +54,18 @@ use hyper_serde::Serde;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
 use js::jsapi::JS_ClearPendingException;
-use js::jsapi::{Heap, JSContext, JSObject};
+use js::jsapi::{Heap, JSObject};
 use js::jsval::{JSVal, NullValue, UndefinedValue};
 use js::rust::wrappers::JS_ParseJSON;
 use js::typedarray::{ArrayBuffer, CreateWith};
 use mime::{self, Mime, Name};
-use net_traits::request::{CredentialsMode, Destination, RequestBuilder, RequestMode};
+use net_traits::request::{CredentialsMode, Destination, Referrer, RequestBuilder, RequestMode};
 use net_traits::trim_http_whitespace;
 use net_traits::CoreResourceMsg::Fetch;
 use net_traits::{FetchChannels, FetchMetadata, FilteredMetadata};
 use net_traits::{FetchResponseListener, NetworkError, ReferrerPolicy};
 use net_traits::{ResourceFetchTiming, ResourceTimingType};
+use script_traits::serializable::BlobImpl;
 use script_traits::DocumentActivity;
 use servo_atoms::Atom;
 use servo_url::ServoUrl;
@@ -98,6 +99,7 @@ struct XHRContext {
     gen_id: GenerationId,
     sync_status: DomRefCell<Option<ErrorResult>>,
     resource_timing: ResourceFetchTiming,
+    url: ServoUrl,
 }
 
 #[derive(Clone)]
@@ -137,6 +139,7 @@ pub struct XMLHttpRequest {
     response_type: Cell<XMLHttpRequestResponseType>,
     response_xml: MutNullableDom<Document>,
     response_blob: MutNullableDom<Blob>,
+    #[ignore_malloc_size_of = "mozjs"]
     response_arraybuffer: Heap<*mut JSObject>,
     #[ignore_malloc_size_of = "Defined in rust-mozjs"]
     response_json: Heap<JSVal>,
@@ -221,6 +224,7 @@ impl XMLHttpRequest {
     }
 
     // https://xhr.spec.whatwg.org/#constructors
+    #[allow(non_snake_case)]
     pub fn Constructor(global: &GlobalScope) -> Fallible<DomRoot<XMLHttpRequest>> {
         Ok(XMLHttpRequest::new(global))
     }
@@ -283,10 +287,7 @@ impl XMLHttpRequest {
 
         impl ResourceTimingListener for XHRContext {
             fn resource_timing_information(&self) -> (InitiatorType, ServoUrl) {
-                (
-                    InitiatorType::XMLHttpRequest,
-                    self.resource_timing_global().get_url().clone(),
-                )
+                (InitiatorType::XMLHttpRequest, self.url.clone())
             }
 
             fn resource_timing_global(&self) -> DomRoot<GlobalScope> {
@@ -653,7 +654,11 @@ impl XMLHttpRequestMethods for XMLHttpRequest {
             .credentials_mode(credentials_mode)
             .use_url_credentials(use_url_credentials)
             .origin(self.global().origin().immutable().clone())
-            .referrer_url(self.referrer_url.clone())
+            .referrer(
+                self.referrer_url
+                    .clone()
+                    .map(|referrer_url| Referrer::ReferrerUrl(referrer_url)),
+            )
             .referrer_policy(self.referrer_policy.clone())
             .pipeline_id(Some(self.global().pipeline_id()));
 
@@ -780,8 +785,10 @@ impl XMLHttpRequestMethods for XMLHttpRequest {
             if !first {
                 vec.extend(", ".as_bytes());
             }
-            first = false;
-            vec.extend(value.as_bytes());
+            if let Ok(v) = str::from_utf8(value.as_bytes()).map(|s| s.trim().as_bytes()) {
+                vec.extend(v);
+                first = false;
+            }
             vec
         });
 
@@ -875,19 +882,19 @@ impl XMLHttpRequestMethods for XMLHttpRequest {
 
     #[allow(unsafe_code)]
     // https://xhr.spec.whatwg.org/#the-response-attribute
-    unsafe fn Response(&self, cx: *mut JSContext) -> JSVal {
-        rooted!(in(cx) let mut rval = UndefinedValue());
+    fn Response(&self, cx: JSContext) -> JSVal {
+        rooted!(in(*cx) let mut rval = UndefinedValue());
         match self.response_type.get() {
-            XMLHttpRequestResponseType::_empty | XMLHttpRequestResponseType::Text => {
+            XMLHttpRequestResponseType::_empty | XMLHttpRequestResponseType::Text => unsafe {
                 let ready_state = self.ready_state.get();
                 // Step 2
                 if ready_state == XMLHttpRequestState::Done ||
                     ready_state == XMLHttpRequestState::Loading
                 {
-                    self.text_response().to_jsval(cx, rval.handle_mut());
+                    self.text_response().to_jsval(*cx, rval.handle_mut());
                 } else {
                     // Step 1
-                    "".to_jsval(cx, rval.handle_mut());
+                    "".to_jsval(*cx, rval.handle_mut());
                 }
             },
             // Step 1
@@ -895,17 +902,17 @@ impl XMLHttpRequestMethods for XMLHttpRequest {
                 return NullValue();
             },
             // Step 2
-            XMLHttpRequestResponseType::Document => {
-                self.document_response().to_jsval(cx, rval.handle_mut());
+            XMLHttpRequestResponseType::Document => unsafe {
+                self.document_response().to_jsval(*cx, rval.handle_mut());
             },
-            XMLHttpRequestResponseType::Json => {
-                self.json_response(cx).to_jsval(cx, rval.handle_mut());
+            XMLHttpRequestResponseType::Json => unsafe {
+                self.json_response(cx).to_jsval(*cx, rval.handle_mut());
             },
-            XMLHttpRequestResponseType::Blob => {
-                self.blob_response().to_jsval(cx, rval.handle_mut());
+            XMLHttpRequestResponseType::Blob => unsafe {
+                self.blob_response().to_jsval(*cx, rval.handle_mut());
             },
             XMLHttpRequestResponseType::Arraybuffer => match self.arraybuffer_response(cx) {
-                Some(js_object) => js_object.to_jsval(cx, rval.handle_mut()),
+                Some(js_object) => unsafe { js_object.to_jsval(*cx, rval.handle_mut()) },
                 None => return NullValue(),
             },
         }
@@ -932,12 +939,6 @@ impl XMLHttpRequestMethods for XMLHttpRequest {
 
     // https://xhr.spec.whatwg.org/#the-responsexml-attribute
     fn GetResponseXML(&self) -> Fallible<Option<DomRoot<Document>>> {
-        // TODO(#2823): Until [Exposed] is implemented, this attribute needs to return null
-        //              explicitly in the worker scope.
-        if self.global().is::<WorkerGlobalScope>() {
-            return Ok(None);
-        }
-
         match self.response_type.get() {
             XMLHttpRequestResponseType::_empty | XMLHttpRequestResponseType::Document => {
                 // Step 3
@@ -1261,19 +1262,19 @@ impl XMLHttpRequest {
         let mime = self
             .final_mime_type()
             .as_ref()
-            .map(|m| m.to_string())
+            .map(|m| normalize_type_string(&m.to_string()))
             .unwrap_or("".to_owned());
 
         // Step 3, 4
         let bytes = self.response.borrow().to_vec();
-        let blob = Blob::new(&self.global(), BlobImpl::new_from_bytes(bytes), mime);
+        let blob = Blob::new(&self.global(), BlobImpl::new_from_bytes(bytes, mime));
         self.response_blob.set(Some(&blob));
         blob
     }
 
     // https://xhr.spec.whatwg.org/#arraybuffer-response
     #[allow(unsafe_code)]
-    unsafe fn arraybuffer_response(&self, cx: *mut JSContext) -> Option<NonNull<JSObject>> {
+    fn arraybuffer_response(&self, cx: JSContext) -> Option<NonNull<JSObject>> {
         // Step 1
         let created = self.response_arraybuffer.get();
         if let Some(nonnull) = NonNull::new(created) {
@@ -1282,21 +1283,28 @@ impl XMLHttpRequest {
 
         // Step 2
         let bytes = self.response.borrow();
-        rooted!(in(cx) let mut array_buffer = ptr::null_mut::<JSObject>());
-        ArrayBuffer::create(cx, CreateWith::Slice(&bytes), array_buffer.handle_mut())
-            .ok()
-            .and_then(|()| {
-                self.response_arraybuffer.set(array_buffer.get());
-                Some(NonNull::new_unchecked(array_buffer.get()))
-            })
+        rooted!(in(*cx) let mut array_buffer = ptr::null_mut::<JSObject>());
+        unsafe {
+            ArrayBuffer::create(*cx, CreateWith::Slice(&bytes), array_buffer.handle_mut())
+                .ok()
+                .and_then(|()| {
+                    self.response_arraybuffer.set(array_buffer.get());
+                    Some(NonNull::new_unchecked(array_buffer.get()))
+                })
+        }
     }
 
     // https://xhr.spec.whatwg.org/#document-response
     fn document_response(&self) -> Option<DomRoot<Document>> {
-        // Step 1
+        // Caching: if we have existing response xml, redirect it directly
         let response = self.response_xml.get();
         if response.is_some() {
             return self.response_xml.get();
+        }
+
+        // Step 1
+        if self.response_status.get().is_err() {
+            return None;
         }
 
         let mime_type = self.final_mime_type();
@@ -1340,7 +1348,7 @@ impl XMLHttpRequest {
 
     #[allow(unsafe_code)]
     // https://xhr.spec.whatwg.org/#json-response
-    fn json_response(&self, cx: *mut JSContext) -> JSVal {
+    fn json_response(&self, cx: JSContext) -> JSVal {
         // Step 1
         let response_json = self.response_json.get();
         if !response_json.is_null_or_undefined() {
@@ -1373,15 +1381,15 @@ impl XMLHttpRequest {
         // if present, but UTF-16BE/LE BOM must not be honored.
         let json_text = decode_to_utf16_with_bom_removal(&bytes, UTF_8);
         // Step 5
-        rooted!(in(cx) let mut rval = UndefinedValue());
+        rooted!(in(*cx) let mut rval = UndefinedValue());
         unsafe {
             if !JS_ParseJSON(
-                cx,
+                *cx,
                 json_text.as_ptr(),
                 json_text.len() as u32,
                 rval.handle_mut(),
             ) {
-                JS_ClearPendingException(cx);
+                JS_ClearPendingException(*cx);
                 return NullValue();
             }
         }
@@ -1461,6 +1469,7 @@ impl XMLHttpRequest {
             gen_id: self.generation_id.get(),
             sync_status: DomRefCell::new(None),
             resource_timing: ResourceFetchTiming::new(ResourceTimingType::Resource),
+            url: init.url.clone(),
         }));
 
         let (task_source, script_port) = if self.sync.get() {
@@ -1665,7 +1674,7 @@ pub fn is_field_value(slice: &[u8]) -> bool {
                     false
                 }
             },
-            0...31 | 127 => false, // CTLs
+            0..=31 | 127 => false, // CTLs
             x if x > 127 => false, // non ASCII
             _ if prev == PreviousCharacter::Other || prev == PreviousCharacter::SPHT => {
                 prev = PreviousCharacter::Other;

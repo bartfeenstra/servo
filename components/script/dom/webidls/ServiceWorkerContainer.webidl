@@ -8,7 +8,8 @@ interface ServiceWorkerContainer : EventTarget {
   readonly attribute ServiceWorker? controller;
   //readonly attribute Promise<ServiceWorkerRegistration> ready;
 
-  [NewObject] Promise<ServiceWorkerRegistration> register(USVString scriptURL, optional RegistrationOptions options);
+  [NewObject] Promise<ServiceWorkerRegistration> register(USVString scriptURL,
+                                                          optional RegistrationOptions options = {});
 
   //[NewObject] Promise<any> getRegistration(optional USVString clientURL = "");
   //[NewObject] Promise<FrozenArray<ServiceWorkerRegistration>> getRegistrations();
@@ -24,6 +25,6 @@ interface ServiceWorkerContainer : EventTarget {
 
 dictionary RegistrationOptions {
   USVString scope;
-  //WorkerType type = "classic";
+  WorkerType type = "classic";
   ServiceWorkerUpdateViaCache updateViaCache = "imports";
 };

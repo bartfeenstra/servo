@@ -1,6 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#the-offscreencanvas-interface
 typedef (OffscreenCanvasRenderingContext2D or WebGLRenderingContext or WebGL2RenderingContext)
@@ -13,9 +13,9 @@ dictionary ImageEncodeOptions {
 
 //enum OffscreenRenderingContextId { "2d", "webgl", "webgl2" };
 
-[Constructor([EnforceRange] unsigned long long width, [EnforceRange] unsigned long long height),
-Exposed=(Window,Worker)/*, Transferable*/, Pref="dom.offscreen_canvas.enabled"]
+[Exposed=(Window,Worker)/*, Transferable*/, Pref="dom.offscreen_canvas.enabled"]
 interface OffscreenCanvas : EventTarget {
+  [Throws] constructor([EnforceRange] unsigned long long width, [EnforceRange] unsigned long long height);
   attribute /*[EnforceRange]*/ unsigned long long width;
   attribute /*[EnforceRange]*/ unsigned long long height;
 

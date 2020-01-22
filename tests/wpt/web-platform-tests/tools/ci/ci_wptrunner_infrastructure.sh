@@ -16,7 +16,7 @@ test_infrastructure() {
     else
         ARGS=$1
     fi
-    ./wpt run --log-tbpl - --yes --manifest ~/meta/MANIFEST.json --metadata infrastructure/metadata/ --install-fonts $ARGS $PRODUCT infrastructure/
+    TERM=dumb ./wpt run --log-mach - --yes --manifest ~/meta/MANIFEST.json --metadata infrastructure/metadata/ --install-fonts $ARGS $PRODUCT infrastructure/
 }
 
 main() {
@@ -25,7 +25,7 @@ main() {
     for PRODUCT in "${PRODUCTS[@]}"; do
         if [[ "$PRODUCT" == "chrome" ]]; then
             add_wpt_hosts
-            test_infrastructure "--binary=$(which google-chrome-unstable)"
+            test_infrastructure "--binary=$(which google-chrome-unstable) --channel dev"
         else
             test_infrastructure
         fi

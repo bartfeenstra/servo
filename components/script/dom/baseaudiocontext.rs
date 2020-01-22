@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::InCompartment;
 use crate::dom::analysernode::AnalyserNode;
 use crate::dom::audiobuffer::AudioBuffer;
 use crate::dom::audiobuffersourcenode::AudioBufferSourceNode;
@@ -23,9 +24,11 @@ use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::DecodeSucc
 use crate::dom::bindings::codegen::Bindings::BiquadFilterNodeBinding::BiquadFilterOptions;
 use crate::dom::bindings::codegen::Bindings::ChannelMergerNodeBinding::ChannelMergerOptions;
 use crate::dom::bindings::codegen::Bindings::ChannelSplitterNodeBinding::ChannelSplitterOptions;
+use crate::dom::bindings::codegen::Bindings::ConstantSourceNodeBinding::ConstantSourceOptions;
 use crate::dom::bindings::codegen::Bindings::GainNodeBinding::GainOptions;
 use crate::dom::bindings::codegen::Bindings::OscillatorNodeBinding::OscillatorOptions;
 use crate::dom::bindings::codegen::Bindings::PannerNodeBinding::PannerOptions;
+use crate::dom::bindings::codegen::Bindings::StereoPannerNodeBinding::StereoPannerOptions;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
@@ -35,23 +38,27 @@ use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::biquadfilternode::BiquadFilterNode;
 use crate::dom::channelmergernode::ChannelMergerNode;
 use crate::dom::channelsplitternode::ChannelSplitterNode;
+use crate::dom::constantsourcenode::ConstantSourceNode;
 use crate::dom::domexception::{DOMErrorName, DOMException};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::gainnode::GainNode;
 use crate::dom::oscillatornode::OscillatorNode;
 use crate::dom::pannernode::PannerNode;
 use crate::dom::promise::Promise;
+use crate::dom::stereopannernode::StereoPannerNode;
 use crate::dom::window::Window;
 use crate::task_source::TaskSource;
 use dom_struct::dom_struct;
 use js::rust::CustomAutoRooterGuard;
 use js::typedarray::ArrayBuffer;
+use msg::constellation_msg::PipelineId;
 use servo_media::audio::context::{AudioContext, AudioContextOptions, ProcessingState};
 use servo_media::audio::context::{OfflineAudioContextOptions, RealTimeAudioContextOptions};
 use servo_media::audio::decoder::AudioDecoderCallbacks;
 use servo_media::audio::graph::NodeId;
-use servo_media::ServoMedia;
+use servo_media::{ClientContextId, ServoMedia};
 use std::cell::Cell;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::rc::Rc;
@@ -75,7 +82,7 @@ struct DecodeResolver {
 pub struct BaseAudioContext {
     eventtarget: EventTarget,
     #[ignore_malloc_size_of = "servo_media"]
-    audio_context_impl: AudioContext,
+    audio_context_impl: Arc<Mutex<AudioContext>>,
     /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-destination
     destination: MutNullableDom<AudioDestinationNode>,
     listener: MutNullableDom<AudioListener>,
@@ -100,7 +107,10 @@ pub struct BaseAudioContext {
 
 impl BaseAudioContext {
     #[allow(unrooted_must_root)]
-    pub fn new_inherited(options: BaseAudioContextOptions) -> BaseAudioContext {
+    pub fn new_inherited(
+        options: BaseAudioContextOptions,
+        pipeline_id: PipelineId,
+    ) -> BaseAudioContext {
         let (sample_rate, channel_count) = match options {
             BaseAudioContextOptions::AudioContext(ref opt) => (opt.sample_rate, 2),
             BaseAudioContextOptions::OfflineAudioContext(ref opt) => {
@@ -108,11 +118,13 @@ impl BaseAudioContext {
             },
         };
 
+        let client_context_id =
+            ClientContextId::build(pipeline_id.namespace_id.0, pipeline_id.index.0.get());
         let context = BaseAudioContext {
             eventtarget: EventTarget::new_inherited(),
             audio_context_impl: ServoMedia::get()
                 .unwrap()
-                .create_audio_context(options.into()),
+                .create_audio_context(&client_context_id, options.into()),
             destination: Default::default(),
             listener: Default::default(),
             in_flight_resume_promises_queue: Default::default(),
@@ -131,16 +143,16 @@ impl BaseAudioContext {
         false
     }
 
-    pub fn audio_context_impl(&self) -> &AudioContext {
-        &self.audio_context_impl
+    pub fn audio_context_impl(&self) -> Arc<Mutex<AudioContext>> {
+        self.audio_context_impl.clone()
     }
 
     pub fn destination_node(&self) -> NodeId {
-        self.audio_context_impl.dest_node()
+        self.audio_context_impl.lock().unwrap().dest_node()
     }
 
     pub fn listener(&self) -> NodeId {
-        self.audio_context_impl.listener()
+        self.audio_context_impl.lock().unwrap().listener()
     }
 
     // https://webaudio.github.io/web-audio-api/#allowed-to-start
@@ -201,7 +213,7 @@ impl BaseAudioContext {
 
     /// Control thread processing state
     pub fn control_thread_state(&self) -> ProcessingState {
-        self.audio_context_impl.state()
+        self.audio_context_impl.lock().unwrap().state()
     }
 
     /// Set audio context state
@@ -216,7 +228,7 @@ impl BaseAudioContext {
         let this = Trusted::new(self);
         // Set the rendering thread state to 'running' and start
         // rendering the audio graph.
-        match self.audio_context_impl.resume() {
+        match self.audio_context_impl.lock().unwrap().resume() {
             Ok(()) => {
                 self.take_pending_resume_promises(Ok(()));
                 let _ = task_source.queue(
@@ -260,7 +272,7 @@ impl BaseAudioContextMethods for BaseAudioContext {
 
     /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-currenttime
     fn CurrentTime(&self) -> Finite<f64> {
-        let current_time = self.audio_context_impl.current_time();
+        let current_time = self.audio_context_impl.lock().unwrap().current_time();
         Finite::wrap(current_time)
     }
 
@@ -270,13 +282,12 @@ impl BaseAudioContextMethods for BaseAudioContext {
     }
 
     /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-resume
-    #[allow(unsafe_code)]
-    fn Resume(&self) -> Rc<Promise> {
+    fn Resume(&self, comp: InCompartment) -> Rc<Promise> {
         // Step 1.
-        let promise = unsafe { Promise::new_in_current_compartment(&self.global()) };
+        let promise = Promise::new_in_current_compartment(&self.global(), comp);
 
         // Step 2.
-        if self.audio_context_impl.state() == ProcessingState::Closed {
+        if self.audio_context_impl.lock().unwrap().state() == ProcessingState::Closed {
             promise.reject_error(Error::InvalidState);
             return promise;
         }
@@ -356,6 +367,24 @@ impl BaseAudioContextMethods for BaseAudioContext {
         )
     }
 
+    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createstereopanner
+    fn CreateStereoPanner(&self) -> Fallible<DomRoot<StereoPannerNode>> {
+        StereoPannerNode::new(
+            &self.global().as_window(),
+            &self,
+            &StereoPannerOptions::empty(),
+        )
+    }
+
+    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createconstantsource
+    fn CreateConstantSource(&self) -> Fallible<DomRoot<ConstantSourceNode>> {
+        ConstantSourceNode::new(
+            &self.global().as_window(),
+            &self,
+            &ConstantSourceOptions::empty(),
+        )
+    }
+
     /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createchannelmerger
     fn CreateChannelMerger(&self, count: u32) -> Fallible<DomRoot<ChannelMergerNode>> {
         let mut opts = ChannelMergerOptions::empty();
@@ -403,15 +432,15 @@ impl BaseAudioContextMethods for BaseAudioContext {
     }
 
     // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-decodeaudiodata
-    #[allow(unsafe_code)]
     fn DecodeAudioData(
         &self,
         audio_data: CustomAutoRooterGuard<ArrayBuffer>,
         decode_success_callback: Option<Rc<DecodeSuccessCallback>>,
         decode_error_callback: Option<Rc<DecodeErrorCallback>>,
+        comp: InCompartment,
     ) -> Rc<Promise> {
         // Step 1.
-        let promise = unsafe { Promise::new_in_current_compartment(&self.global()) };
+        let promise = Promise::new_in_current_compartment(&self.global(), comp);
         let global = self.global();
         let window = global.as_window();
 
@@ -432,6 +461,11 @@ impl BaseAudioContextMethods for BaseAudioContext {
             let decoded_audio = Arc::new(Mutex::new(Vec::new()));
             let decoded_audio_ = decoded_audio.clone();
             let decoded_audio__ = decoded_audio.clone();
+            // servo-media returns an audio channel position along
+            // with the AudioDecoderCallback progress callback, which
+            // may not be the same as the index of the decoded_audio
+            // Vec.
+            let channels = Arc::new(Mutex::new(HashMap::new()));
             let this = Trusted::new(self);
             let this_ = this.clone();
             let (task_source, canceller) = window
@@ -447,8 +481,13 @@ impl BaseAudioContextMethods for BaseAudioContext {
                         .unwrap()
                         .resize(channel_count as usize, Vec::new());
                 })
-                .progress(move |buffer, channel| {
+                .progress(move |buffer, channel_pos| {
                     let mut decoded_audio = decoded_audio_.lock().unwrap();
+                    let mut channels = channels.lock().unwrap();
+                    let channel = match channels.entry(channel_pos) {
+                        Entry::Occupied(entry) => *entry.get(),
+                        Entry::Vacant(entry) => *entry.insert(decoded_audio.len()),
+                    };
                     decoded_audio[(channel - 1) as usize].extend_from_slice((*buffer).as_ref());
                 })
                 .eos(move || {
@@ -498,6 +537,8 @@ impl BaseAudioContextMethods for BaseAudioContext {
                 })
                 .build();
             self.audio_context_impl
+                .lock()
+                .unwrap()
                 .decode_audio_data(audio_data, callbacks);
         } else {
             // Step 3.

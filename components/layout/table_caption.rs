@@ -12,7 +12,7 @@ use crate::display_list::{
 use crate::flow::{Flow, FlowClass, OpaqueFlow};
 use crate::fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
 use app_units::Au;
-use euclid::Point2D;
+use euclid::default::Point2D;
 use gfx_traits::print_tree::PrintTree;
 use std::fmt;
 use style::logical_geometry::LogicalSize;
@@ -38,10 +38,6 @@ impl TableCaptionFlow {
 impl Flow for TableCaptionFlow {
     fn class(&self) -> FlowClass {
         FlowClass::TableCaption
-    }
-
-    fn as_mut_table_caption(&mut self) -> &mut TableCaptionFlow {
-        self
     }
 
     fn as_mut_block(&mut self) -> &mut BlockFlow {

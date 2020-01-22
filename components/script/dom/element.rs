@@ -6,7 +6,7 @@
 
 use crate::dom::activation::Activatable;
 use crate::dom::attr::{Attr, AttrHelpersForLayout};
-use crate::dom::bindings::cell::DomRefCell;
+use crate::dom::bindings::cell::{ref_filter_map, DomRefCell, Ref, RefMut};
 use crate::dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use crate::dom::bindings::codegen::Bindings::ElementBinding;
@@ -15,6 +15,7 @@ use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::FunctionBinding::Function;
 use crate::dom::bindings::codegen::Bindings::HTMLTemplateElementBinding::HTMLTemplateElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
+use crate::dom::bindings::codegen::Bindings::ShadowRootBinding::ShadowRootBinding::ShadowRootMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::{ScrollBehavior, ScrollToOptions};
 use crate::dom::bindings::codegen::UnionTypes::NodeOrString;
@@ -32,9 +33,9 @@ use crate::dom::bindings::xmlname::{
 use crate::dom::characterdata::CharacterData;
 use crate::dom::create::create_element;
 use crate::dom::customelementregistry::{
-    CallbackReaction, CustomElementDefinition, CustomElementReaction,
+    CallbackReaction, CustomElementDefinition, CustomElementReaction, CustomElementState,
 };
-use crate::dom::document::{Document, LayoutDocumentHelpers};
+use crate::dom::document::{determine_policy_for_token, Document, LayoutDocumentHelpers};
 use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::domrect::DOMRect;
 use crate::dom::domtokenlist::DOMTokenList;
@@ -71,11 +72,13 @@ use crate::dom::htmltextareaelement::{HTMLTextAreaElement, LayoutHTMLTextAreaEle
 use crate::dom::mutationobserver::{Mutation, MutationObserver};
 use crate::dom::namednodemap::NamedNodeMap;
 use crate::dom::node::{document_from_node, window_from_node};
-use crate::dom::node::{ChildrenMutation, LayoutNodeHelpers, Node};
-use crate::dom::node::{NodeDamage, NodeFlags, UnbindContext};
+use crate::dom::node::{BindContext, NodeDamage, NodeFlags, UnbindContext};
+use crate::dom::node::{ChildrenMutation, LayoutNodeHelpers, Node, ShadowIncluding};
 use crate::dom::nodelist::NodeList;
 use crate::dom::promise::Promise;
+use crate::dom::raredata::ElementRareData;
 use crate::dom::servoparser::ServoParser;
+use crate::dom::shadowroot::{IsUserAgentWidget, ShadowRoot};
 use crate::dom::text::Text;
 use crate::dom::validation::Validatable;
 use crate::dom::virtualmethods::{vtable_for, VirtualMethods};
@@ -94,7 +97,7 @@ use js::jsapi::Heap;
 use js::jsval::JSVal;
 use msg::constellation_msg::InputMethodType;
 use net_traits::request::CorsSettings;
-use ref_filter_map::ref_filter_map;
+use net_traits::ReferrerPolicy;
 use script_layout_interface::message::ReflowGoal;
 use selectors::attr::{AttrSelectorOperation, CaseSensitivity, NamespaceConstraint};
 use selectors::matching::{ElementSelectorFlags, MatchingContext};
@@ -103,7 +106,7 @@ use selectors::Element as SelectorsElement;
 use servo_arc::Arc;
 use servo_atoms::Atom;
 use std::borrow::Cow;
-use std::cell::{Cell, Ref};
+use std::cell::Cell;
 use std::default::Default;
 use std::fmt;
 use std::mem;
@@ -129,8 +132,7 @@ use style::selector_parser::{
 use style::shared_lock::{Locked, SharedRwLock};
 use style::thread_state;
 use style::values::generics::NonNegative;
-use style::values::{computed, specified};
-use style::values::{CSSFloat, Either};
+use style::values::{computed, specified, CSSFloat};
 use style::CaseSensitivityExt;
 use xml5ever::serialize as xmlSerialize;
 use xml5ever::serialize::SerializeOpts as XmlSerializeOpts;
@@ -163,13 +165,7 @@ pub struct Element {
     /// when it has exclusive access to the element.
     #[ignore_malloc_size_of = "bitflags defined in rust-selectors"]
     selector_flags: Cell<ElementSelectorFlags>,
-    /// <https://html.spec.whatwg.org/multipage/#custom-element-reaction-queue>
-    custom_element_reaction_queue: DomRefCell<Vec<CustomElementReaction>>,
-    /// <https://dom.spec.whatwg.org/#concept-element-custom-element-definition>
-    #[ignore_malloc_size_of = "Rc"]
-    custom_element_definition: DomRefCell<Option<Rc<CustomElementDefinition>>>,
-    /// <https://dom.spec.whatwg.org/#concept-element-custom-element-state>
-    custom_element_state: Cell<CustomElementState>,
+    rare_data: DomRefCell<Option<Box<ElementRareData>>>,
 }
 
 impl fmt::Debug for Element {
@@ -197,15 +193,6 @@ pub enum ElementCreator {
 pub enum CustomElementCreationMode {
     Synchronous,
     Asynchronous,
-}
-
-/// <https://dom.spec.whatwg.org/#concept-element-custom-element-state>
-#[derive(Clone, Copy, Eq, JSTraceable, MallocSizeOf, PartialEq)]
-pub enum CustomElementState {
-    Undefined,
-    Failed,
-    Uncustomized,
-    Custom,
 }
 
 impl ElementCreator {
@@ -294,9 +281,7 @@ impl Element {
             class_list: Default::default(),
             state: Cell::new(state),
             selector_flags: Cell::new(ElementSelectorFlags::empty()),
-            custom_element_reaction_queue: Default::default(),
-            custom_element_definition: Default::default(),
-            custom_element_state: Cell::new(CustomElementState::Uncustomized),
+            rare_data: Default::default(),
         }
     }
 
@@ -314,6 +299,8 @@ impl Element {
             ElementBinding::Wrap,
         )
     }
+
+    impl_rare_data!(ElementRareData);
 
     pub fn restyle(&self, damage: NodeDamage) {
         let doc = self.node.owner_doc();
@@ -337,49 +324,60 @@ impl Element {
     }
 
     pub fn set_custom_element_state(&self, state: CustomElementState) {
-        self.custom_element_state.set(state);
+        self.ensure_rare_data().custom_element_state = state;
     }
 
     pub fn get_custom_element_state(&self) -> CustomElementState {
-        self.custom_element_state.get()
+        if let Some(rare_data) = self.rare_data().as_ref() {
+            return rare_data.custom_element_state;
+        }
+        CustomElementState::Undefined
     }
 
     pub fn set_custom_element_definition(&self, definition: Rc<CustomElementDefinition>) {
-        *self.custom_element_definition.borrow_mut() = Some(definition);
+        self.ensure_rare_data().custom_element_definition = Some(definition);
     }
 
     pub fn get_custom_element_definition(&self) -> Option<Rc<CustomElementDefinition>> {
-        (*self.custom_element_definition.borrow()).clone()
+        self.rare_data().as_ref()?.custom_element_definition.clone()
     }
 
     pub fn push_callback_reaction(&self, function: Rc<Function>, args: Box<[Heap<JSVal>]>) {
-        self.custom_element_reaction_queue
-            .borrow_mut()
+        self.ensure_rare_data()
+            .custom_element_reaction_queue
             .push(CustomElementReaction::Callback(function, args));
     }
 
     pub fn push_upgrade_reaction(&self, definition: Rc<CustomElementDefinition>) {
-        self.custom_element_reaction_queue
-            .borrow_mut()
+        self.ensure_rare_data()
+            .custom_element_reaction_queue
             .push(CustomElementReaction::Upgrade(definition));
     }
 
     pub fn clear_reaction_queue(&self) {
-        self.custom_element_reaction_queue.borrow_mut().clear();
+        if let Some(ref mut rare_data) = *self.rare_data_mut() {
+            rare_data.custom_element_reaction_queue.clear();
+        }
     }
 
     pub fn invoke_reactions(&self) {
-        // TODO: This is not spec compliant, as this will allow some reactions to be processed
-        // after clear_reaction_queue has been called.
-        rooted_vec!(let mut reactions);
-        while !self.custom_element_reaction_queue.borrow().is_empty() {
-            mem::swap(
-                &mut *reactions,
-                &mut *self.custom_element_reaction_queue.borrow_mut(),
-            );
+        loop {
+            rooted_vec!(let mut reactions);
+            match *self.rare_data_mut() {
+                Some(ref mut data) => {
+                    mem::swap(&mut *reactions, &mut data.custom_element_reaction_queue)
+                },
+                None => break,
+            };
+
+            if reactions.is_empty() {
+                break;
+            }
+
             for reaction in reactions.iter() {
                 reaction.invoke(self);
             }
+
             reactions.clear();
         }
     }
@@ -435,6 +433,82 @@ impl Element {
             box_.clone_overflow_x() == overflow_x::computed_value::T::Hidden ||
                 box_.clone_overflow_y() == overflow_y::computed_value::T::Hidden
         })
+    }
+
+    fn shadow_root(&self) -> Option<DomRoot<ShadowRoot>> {
+        self.rare_data()
+            .as_ref()?
+            .shadow_root
+            .as_ref()
+            .map(|sr| DomRoot::from_ref(&**sr))
+    }
+
+    pub fn is_shadow_host(&self) -> bool {
+        self.shadow_root().is_some()
+    }
+
+    /// https://dom.spec.whatwg.org/#dom-element-attachshadow
+    /// XXX This is not exposed to web content yet. It is meant to be used
+    ///     for UA widgets only.
+    pub fn attach_shadow(&self, is_ua_widget: IsUserAgentWidget) -> Fallible<DomRoot<ShadowRoot>> {
+        // Step 1.
+        if self.namespace != ns!(html) {
+            return Err(Error::NotSupported);
+        }
+
+        // Step 2.
+        match self.local_name() {
+            &local_name!("article") |
+            &local_name!("aside") |
+            &local_name!("blockquote") |
+            &local_name!("body") |
+            &local_name!("div") |
+            &local_name!("footer") |
+            &local_name!("h1") |
+            &local_name!("h2") |
+            &local_name!("h3") |
+            &local_name!("h4") |
+            &local_name!("h5") |
+            &local_name!("h6") |
+            &local_name!("header") |
+            &local_name!("main") |
+            &local_name!("nav") |
+            &local_name!("p") |
+            &local_name!("section") |
+            &local_name!("span") => {},
+            &local_name!("video") | &local_name!("audio")
+                if is_ua_widget == IsUserAgentWidget::Yes => {},
+            _ => return Err(Error::NotSupported),
+        };
+
+        // Step 3.
+        if self.is_shadow_host() {
+            return Err(Error::InvalidState);
+        }
+
+        // Steps 4, 5 and 6.
+        let shadow_root = ShadowRoot::new(self, &*self.node.owner_doc());
+        self.ensure_rare_data().shadow_root = Some(Dom::from_ref(&*shadow_root));
+        shadow_root
+            .upcast::<Node>()
+            .set_containing_shadow_root(Some(&shadow_root));
+
+        if self.is_connected() {
+            self.node.owner_doc().register_shadow_root(&*shadow_root);
+        }
+
+        self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
+
+        Ok(shadow_root)
+    }
+
+    pub fn detach_shadow(&self) {
+        if let Some(ref shadow_root) = self.shadow_root() {
+            shadow_root.detach();
+            self.ensure_rare_data().shadow_root = None;
+        } else {
+            debug_assert!(false, "Trying to detach a non-attached shadow root");
+        }
     }
 }
 
@@ -529,11 +603,12 @@ pub trait LayoutElementHelpers {
     fn local_name(&self) -> &LocalName;
     fn namespace(&self) -> &Namespace;
     fn get_lang_for_layout(&self) -> String;
-    fn get_checked_state_for_layout(&self) -> bool;
-    fn get_indeterminate_state_for_layout(&self) -> bool;
     fn get_state_for_layout(&self) -> ElementState;
     fn insert_selector_flags(&self, flags: ElementSelectorFlags);
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool;
+    /// The shadow root this element is a host of.
+    #[allow(unsafe_code)]
+    unsafe fn get_shadow_root_for_layout(&self) -> Option<LayoutDom<ShadowRoot>>;
 }
 
 impl LayoutElementHelpers for LayoutDom<Element> {
@@ -611,9 +686,12 @@ impl LayoutElementHelpers for LayoutDom<Element> {
         if let Some(url) = background {
             hints.push(from_declaration(
                 shared_lock,
-                PropertyDeclaration::BackgroundImage(background_image::SpecifiedValue(vec![
-                    Either::Second(specified::Image::for_cascade(url.into())),
-                ])),
+                PropertyDeclaration::BackgroundImage(background_image::SpecifiedValue(
+                    vec![specified::ImageLayer::Image(specified::Image::for_cascade(
+                        url.into(),
+                    ))]
+                    .into(),
+                )),
             ));
         }
 
@@ -932,7 +1010,7 @@ impl LayoutElementHelpers for LayoutDom<Element> {
         unsafe {
             let mut current_node = Some(self.upcast::<Node>());
             while let Some(node) = current_node {
-                current_node = node.parent_node_ref();
+                current_node = node.composed_parent_node_ref();
                 match node.downcast::<Element>().map(|el| el.unsafe_get()) {
                     Some(elem) => {
                         if let Some(attr) =
@@ -957,26 +1035,6 @@ impl LayoutElementHelpers for LayoutDom<Element> {
 
     #[inline]
     #[allow(unsafe_code)]
-    fn get_checked_state_for_layout(&self) -> bool {
-        // TODO option and menuitem can also have a checked state.
-        match self.downcast::<HTMLInputElement>() {
-            Some(input) => unsafe { input.checked_state_for_layout() },
-            None => false,
-        }
-    }
-
-    #[inline]
-    #[allow(unsafe_code)]
-    fn get_indeterminate_state_for_layout(&self) -> bool {
-        // TODO progress elements can also be matched with :indeterminate
-        match self.downcast::<HTMLInputElement>() {
-            Some(input) => unsafe { input.indeterminate_state_for_layout() },
-            None => false,
-        }
-    }
-
-    #[inline]
-    #[allow(unsafe_code)]
     fn get_state_for_layout(&self) -> ElementState {
         unsafe { (*self.unsafe_get()).state.get() }
     }
@@ -995,6 +1053,17 @@ impl LayoutElementHelpers for LayoutDom<Element> {
     #[allow(unsafe_code)]
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {
         unsafe { (*self.unsafe_get()).selector_flags.get().contains(flags) }
+    }
+
+    #[inline]
+    #[allow(unsafe_code)]
+    unsafe fn get_shadow_root_for_layout(&self) -> Option<LayoutDom<ShadowRoot>> {
+        (*self.unsafe_get())
+            .rare_data_for_layout()
+            .as_ref()?
+            .shadow_root
+            .as_ref()
+            .map(|sr| sr.to_layout())
     }
 }
 
@@ -1040,7 +1109,7 @@ impl Element {
 
         let inclusive_ancestor_elements = self
             .upcast::<Node>()
-            .inclusive_ancestors()
+            .inclusive_ancestors(ShadowIncluding::No)
             .filter_map(DomRoot::downcast::<Self>);
 
         // Steps 3-4.
@@ -1133,6 +1202,7 @@ impl Element {
         }
     }
 
+    #[allow(non_snake_case)]
     pub fn xmlSerialize(&self, traversal_scope: XmlTraversalScope) -> Fallible<DOMString> {
         let mut writer = vec![];
         match xmlSerialize::serialize(
@@ -1156,7 +1226,7 @@ impl Element {
                 .unwrap()
         } else {
             self.upcast::<Node>()
-                .inclusive_ancestors()
+                .inclusive_ancestors(ShadowIncluding::No)
                 .filter_map(DomRoot::downcast)
                 .last()
                 .expect("We know inclusive_ancestors will return `self` which is an element")
@@ -1165,7 +1235,10 @@ impl Element {
 
     // https://dom.spec.whatwg.org/#locate-a-namespace-prefix
     pub fn lookup_prefix(&self, namespace: Namespace) -> Option<DOMString> {
-        for node in self.upcast::<Node>().inclusive_ancestors() {
+        for node in self
+            .upcast::<Node>()
+            .inclusive_ancestors(ShadowIncluding::No)
+        {
             let element = node.downcast::<Element>()?;
             // Step 1.
             if *element.namespace() == namespace {
@@ -1263,9 +1336,8 @@ impl Element {
         namespace: Namespace,
         prefix: Option<Prefix>,
     ) {
-        let window = window_from_node(self);
         let attr = Attr::new(
-            &window,
+            &self.node.owner_doc(),
             local_name,
             value,
             name,
@@ -1293,7 +1365,7 @@ impl Element {
             ScriptThread::enqueue_callback_reaction(self, reaction, None);
         }
 
-        assert!(attr.GetOwnerElement().deref() == Some(self));
+        assert!(attr.GetOwnerElement().as_deref() == Some(self));
         self.will_mutate_attr(attr);
         self.attrs.borrow_mut().push(Dom::from_ref(attr));
         if attr.namespace() == &ns!() {
@@ -1608,12 +1680,12 @@ impl Element {
                 }
             },
             AdjacentPosition::AfterBegin => {
-                Node::pre_insert(node, &self_node, self_node.GetFirstChild().deref()).map(Some)
+                Node::pre_insert(node, &self_node, self_node.GetFirstChild().as_deref()).map(Some)
             },
             AdjacentPosition::BeforeEnd => Node::pre_insert(node, &self_node, None).map(Some),
             AdjacentPosition::AfterEnd => {
                 if let Some(parent) = self_node.GetParentNode() {
-                    Node::pre_insert(node, &parent, self_node.GetNextSibling().deref()).map(Some)
+                    Node::pre_insert(node, &parent, self_node.GetNextSibling().as_deref()).map(Some)
                 } else {
                     Ok(None)
                 }
@@ -1653,7 +1725,7 @@ impl Element {
         }
 
         // Step 9
-        if doc.GetBody().deref() == self.downcast::<HTMLElement>() &&
+        if doc.GetBody().as_deref() == self.downcast::<HTMLElement>() &&
             doc.quirks_mode() == QuirksMode::Quirks &&
             !self.potentially_scrollable()
         {
@@ -2122,7 +2194,7 @@ impl ElementMethods for Element {
         }
 
         // Step 7
-        if doc.GetBody().deref() == self.downcast::<HTMLElement>() &&
+        if doc.GetBody().as_deref() == self.downcast::<HTMLElement>() &&
             doc.quirks_mode() == QuirksMode::Quirks &&
             !self.potentially_scrollable()
         {
@@ -2172,7 +2244,7 @@ impl ElementMethods for Element {
         }
 
         // Step 9
-        if doc.GetBody().deref() == self.downcast::<HTMLElement>() &&
+        if doc.GetBody().as_deref() == self.downcast::<HTMLElement>() &&
             doc.quirks_mode() == QuirksMode::Quirks &&
             !self.potentially_scrollable()
         {
@@ -2218,7 +2290,7 @@ impl ElementMethods for Element {
         }
 
         // Step 7
-        if doc.GetBody().deref() == self.downcast::<HTMLElement>() &&
+        if doc.GetBody().as_deref() == self.downcast::<HTMLElement>() &&
             doc.quirks_mode() == QuirksMode::Quirks &&
             !self.potentially_scrollable()
         {
@@ -2269,7 +2341,7 @@ impl ElementMethods for Element {
         }
 
         // Step 9
-        if doc.GetBody().deref() == self.downcast::<HTMLElement>() &&
+        if doc.GetBody().as_deref() == self.downcast::<HTMLElement>() &&
             doc.quirks_mode() == QuirksMode::Quirks &&
             !self.potentially_scrollable()
         {
@@ -2372,7 +2444,7 @@ impl ElementMethods for Element {
             NodeTypeId::Document(_) => return Err(Error::NoModificationAllowed),
 
             // Step 4.
-            NodeTypeId::DocumentFragment => {
+            NodeTypeId::DocumentFragment(_) => {
                 let body_elem = Element::create(
                     QualName::new(None, ns!(html), local_name!("body")),
                     None,
@@ -2586,6 +2658,13 @@ impl ElementMethods for Element {
         let doc = document_from_node(self);
         doc.enter_fullscreen(self)
     }
+
+    // XXX Hidden under dom.shadowdom.enabled pref. Only exposed to be able
+    //     to test partial Shadow DOM support for UA widgets.
+    // https://dom.spec.whatwg.org/#dom-element-attachshadow
+    fn AttachShadow(&self) -> Fallible<DomRoot<ShadowRoot>> {
+        self.attach_shadow(IsUserAgentWidget::No)
+    }
 }
 
 impl VirtualMethods for Element {
@@ -2658,21 +2737,34 @@ impl VirtualMethods for Element {
                         None
                     }
                 });
-                if node.is_in_doc() {
+                let containing_shadow_root = self.upcast::<Node>().containing_shadow_root();
+                if node.is_connected() {
                     let value = attr.value().as_atom().clone();
                     match mutation {
                         AttributeMutation::Set(old_value) => {
                             if let Some(old_value) = old_value {
                                 let old_value = old_value.as_atom().clone();
-                                doc.unregister_named_element(self, old_value);
+                                if let Some(ref shadow_root) = containing_shadow_root {
+                                    shadow_root.unregister_named_element(self, old_value);
+                                } else {
+                                    doc.unregister_named_element(self, old_value);
+                                }
                             }
                             if value != atom!("") {
-                                doc.register_named_element(self, value);
+                                if let Some(ref shadow_root) = containing_shadow_root {
+                                    shadow_root.register_named_element(self, value);
+                                } else {
+                                    doc.register_named_element(self, value);
+                                }
                             }
                         },
                         AttributeMutation::Removed => {
                             if value != atom!("") {
-                                doc.unregister_named_element(self, value);
+                                if let Some(ref shadow_root) = containing_shadow_root {
+                                    shadow_root.unregister_named_element(self, value);
+                                } else {
+                                    doc.unregister_named_element(self, value);
+                                }
                             }
                         },
                     }
@@ -2704,22 +2796,37 @@ impl VirtualMethods for Element {
         }
     }
 
-    fn bind_to_tree(&self, tree_in_doc: bool) {
+    fn bind_to_tree(&self, context: &BindContext) {
         if let Some(ref s) = self.super_type() {
-            s.bind_to_tree(tree_in_doc);
+            s.bind_to_tree(context);
         }
 
         if let Some(f) = self.as_maybe_form_control() {
             f.bind_form_control_to_tree();
         }
 
-        if !tree_in_doc {
+        let doc = document_from_node(self);
+
+        if let Some(ref shadow_root) = self.shadow_root() {
+            doc.register_shadow_root(&shadow_root);
+            let shadow_root = shadow_root.upcast::<Node>();
+            shadow_root.set_flag(NodeFlags::IS_CONNECTED, context.tree_connected);
+            for node in shadow_root.children() {
+                node.set_flag(NodeFlags::IS_CONNECTED, context.tree_connected);
+                node.bind_to_tree(context);
+            }
+        }
+
+        if !context.tree_connected {
             return;
         }
 
-        let doc = document_from_node(self);
         if let Some(ref value) = *self.id_attribute.borrow() {
-            doc.register_named_element(self, value.clone());
+            if let Some(shadow_root) = self.upcast::<Node>().containing_shadow_root() {
+                shadow_root.register_named_element(self, value.clone());
+            } else {
+                doc.register_named_element(self, value.clone());
+            }
         }
         // This is used for layout optimization.
         doc.increment_dom_count();
@@ -2732,13 +2839,24 @@ impl VirtualMethods for Element {
             f.unbind_form_control_from_tree();
         }
 
-        if !context.tree_in_doc {
+        if !context.tree_connected {
             return;
         }
 
         let doc = document_from_node(self);
+
+        if let Some(ref shadow_root) = self.shadow_root() {
+            doc.unregister_shadow_root(&shadow_root);
+            let shadow_root = shadow_root.upcast::<Node>();
+            shadow_root.set_flag(NodeFlags::IS_CONNECTED, false);
+            for node in shadow_root.children() {
+                node.set_flag(NodeFlags::IS_CONNECTED, false);
+                node.unbind_from_tree(context);
+            }
+        }
+
         let fullscreen = doc.GetFullscreenElement();
-        if fullscreen.deref() == Some(self) {
+        if fullscreen.as_deref() == Some(self) {
             doc.exit_fullscreen();
         }
         if let Some(ref value) = *self.id_attribute.borrow() {
@@ -2797,11 +2915,22 @@ impl<'a> SelectorsElement for DomRoot<Element> {
     }
 
     fn parent_node_is_shadow_root(&self) -> bool {
-        false
+        match self.upcast::<Node>().GetParentNode() {
+            None => false,
+            Some(node) => node.is::<ShadowRoot>(),
+        }
     }
 
     fn containing_shadow_host(&self) -> Option<Self> {
-        None
+        if let Some(shadow_root) = self.upcast::<Node>().containing_shadow_root() {
+            Some(shadow_root.Host())
+        } else {
+            None
+        }
+    }
+
+    fn is_pseudo_element(&self) -> bool {
+        false
     }
 
     fn match_pseudo_element(
@@ -2859,12 +2988,17 @@ impl<'a> SelectorsElement for DomRoot<Element> {
         })
     }
 
-    fn local_name(&self) -> &LocalName {
-        Element::local_name(self)
+    fn has_local_name(&self, local_name: &LocalName) -> bool {
+        Element::local_name(self) == local_name
     }
 
-    fn namespace(&self) -> &Namespace {
-        Element::namespace(self)
+    fn has_namespace(&self, ns: &Namespace) -> bool {
+        Element::namespace(self) == ns
+    }
+
+    fn is_same_type(&self, other: &Self) -> bool {
+        Element::local_name(self) == Element::local_name(other) &&
+            Element::namespace(self) == Element::namespace(other)
     }
 
     fn match_non_ts_pseudo_class<F>(
@@ -2888,10 +3022,6 @@ impl<'a> SelectorsElement for DomRoot<Element> {
                     Some(_) => true,
                 },
             },
-
-            NonTSPseudoClass::ServoCaseSensitiveTypeAttr(ref expected_value) => self
-                .get_attribute(&ns!(), &local_name!("type"))
-                .map_or(false, |attr| attr.value().eq(expected_value)),
 
             // FIXME(heycam): This is wrong, since extended_filtering accepts
             // a string containing commas (separating each language tag in
@@ -2936,6 +3066,18 @@ impl<'a> SelectorsElement for DomRoot<Element> {
             .borrow()
             .as_ref()
             .map_or(false, |atom| case_sensitivity.eq_atom(id, atom))
+    }
+
+    fn is_part(&self, _name: &Atom) -> bool {
+        false
+    }
+
+    fn exported_part(&self, _: &Atom) -> Option<Atom> {
+        None
+    }
+
+    fn imported_part(&self, _: &Atom) -> Option<Atom> {
+        None
     }
 
     fn has_class(&self, name: &Atom, case_sensitivity: CaseSensitivity) -> bool {
@@ -3115,7 +3257,7 @@ impl Element {
     // https://html.spec.whatwg.org/multipage/#language
     pub fn get_lang(&self) -> String {
         self.upcast::<Node>()
-            .inclusive_ancestors()
+            .inclusive_ancestors(ShadowIncluding::No)
             .filter_map(|node| {
                 node.downcast::<Element>().and_then(|el| {
                     el.get_attribute(&ns!(xml), &local_name!("lang"))
@@ -3146,10 +3288,6 @@ impl Element {
             state.remove(which);
         }
         self.state.set(state);
-    }
-
-    pub fn active_state(&self) -> bool {
-        self.state.get().contains(ElementState::IN_ACTIVE_STATE)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#concept-selector-active>
@@ -3215,16 +3353,8 @@ impl Element {
         }
     }
 
-    pub fn target_state(&self) -> bool {
-        self.state.get().contains(ElementState::IN_TARGET_STATE)
-    }
-
     pub fn set_target_state(&self, value: bool) {
         self.set_state(ElementState::IN_TARGET_STATE, value)
-    }
-
-    pub fn fullscreen_state(&self) -> bool {
-        self.state.get().contains(ElementState::IN_FULLSCREEN_STATE)
     }
 
     pub fn set_fullscreen_state(&self, value: bool) {
@@ -3233,9 +3363,7 @@ impl Element {
 
     /// <https://dom.spec.whatwg.org/#connected>
     pub fn is_connected(&self) -> bool {
-        let node = self.upcast::<Node>();
-        let root = node.GetRootNode();
-        root.is::<Document>()
+        self.upcast::<Node>().is_connected()
     }
 
     // https://html.spec.whatwg.org/multipage/#cannot-navigate
@@ -3486,7 +3614,14 @@ pub fn set_cross_origin_attribute(element: &Element, value: Option<DOMString>) {
     }
 }
 
-pub fn cors_setting_for_element(element: &Element) -> Option<CorsSettings> {
+pub(crate) fn referrer_policy_for_element(element: &Element) -> Option<ReferrerPolicy> {
+    element
+        .get_attribute_by_name(DOMString::from_string(String::from("referrerpolicy")))
+        .and_then(|attribute: DomRoot<Attr>| determine_policy_for_token(&attribute.Value()))
+        .or_else(|| document_from_node(element).get_referrer_policy())
+}
+
+pub(crate) fn cors_setting_for_element(element: &Element) -> Option<CorsSettings> {
     reflect_cross_origin_attribute(element).map_or(None, |attr| match &*attr {
         "anonymous" => Some(CorsSettings::Anonymous),
         "use-credentials" => Some(CorsSettings::UseCredentials),

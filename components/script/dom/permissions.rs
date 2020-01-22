@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::{AlreadyInCompartment, InCompartment};
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionDescriptor;
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionStatusMethods;
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::{
@@ -16,12 +17,11 @@ use crate::dom::bluetoothpermissionresult::BluetoothPermissionResult;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::permissionstatus::PermissionStatus;
 use crate::dom::promise::Promise;
+use crate::script_runtime::JSContext;
 use dom_struct::dom_struct;
 use js::conversions::ConversionResult;
-use js::jsapi::{JSContext, JSObject};
+use js::jsapi::JSObject;
 use js::jsval::{ObjectValue, UndefinedValue};
-#[cfg(target_os = "linux")]
-use servo_config::opts;
 use servo_config::pref;
 use std::rc::Rc;
 #[cfg(target_os = "linux")]
@@ -32,24 +32,22 @@ const DIALOG_TITLE: &'static str = "Permission request dialog";
 const NONSECURE_DIALOG_MESSAGE: &'static str = "feature is only safe to use in secure context,\
  but servo can't guarantee\n that the current context is secure. Do you want to proceed and grant permission?";
 const REQUEST_DIALOG_MESSAGE: &'static str = "Do you want to grant permission for";
-const ROOT_DESC_CONVERSION_ERROR: &'static str =
-    "Can't convert to an IDL value of type PermissionDescriptor";
 
 pub trait PermissionAlgorithm {
     type Descriptor;
     type Status;
     fn create_descriptor(
-        cx: *mut JSContext,
+        cx: JSContext,
         permission_descriptor_obj: *mut JSObject,
     ) -> Result<Self::Descriptor, Error>;
     fn permission_query(
-        cx: *mut JSContext,
+        cx: JSContext,
         promise: &Rc<Promise>,
         descriptor: &Self::Descriptor,
         status: &Self::Status,
     );
     fn permission_request(
-        cx: *mut JSContext,
+        cx: JSContext,
         promise: &Rc<Promise>,
         descriptor: &Self::Descriptor,
         status: &Self::Status,
@@ -87,18 +85,24 @@ impl Permissions {
     // https://w3c.github.io/permissions/#dom-permissions-query
     // https://w3c.github.io/permissions/#dom-permissions-request
     // https://w3c.github.io/permissions/#dom-permissions-revoke
-    #[allow(unsafe_code)]
+    #[allow(non_snake_case)]
     fn manipulate(
         &self,
         op: Operation,
-        cx: *mut JSContext,
+        cx: JSContext,
         permissionDesc: *mut JSObject,
         promise: Option<Rc<Promise>>,
     ) -> Rc<Promise> {
         // (Query, Request) Step 3.
         let p = match promise {
             Some(promise) => promise,
-            None => unsafe { Promise::new_in_current_compartment(&self.global()) },
+            None => {
+                let in_compartment_proof = AlreadyInCompartment::assert(&self.global());
+                Promise::new_in_current_compartment(
+                    &self.global(),
+                    InCompartment::Already(&in_compartment_proof),
+                )
+            },
         };
 
         // (Query, Request, Revoke) Step 1.
@@ -196,22 +200,20 @@ impl Permissions {
     }
 }
 
+#[allow(non_snake_case)]
 impl PermissionsMethods for Permissions {
-    #[allow(unsafe_code)]
     // https://w3c.github.io/permissions/#dom-permissions-query
-    unsafe fn Query(&self, cx: *mut JSContext, permissionDesc: *mut JSObject) -> Rc<Promise> {
+    fn Query(&self, cx: JSContext, permissionDesc: *mut JSObject) -> Rc<Promise> {
         self.manipulate(Operation::Query, cx, permissionDesc, None)
     }
 
-    #[allow(unsafe_code)]
     // https://w3c.github.io/permissions/#dom-permissions-request
-    unsafe fn Request(&self, cx: *mut JSContext, permissionDesc: *mut JSObject) -> Rc<Promise> {
+    fn Request(&self, cx: JSContext, permissionDesc: *mut JSObject) -> Rc<Promise> {
         self.manipulate(Operation::Request, cx, permissionDesc, None)
     }
 
-    #[allow(unsafe_code)]
     // https://w3c.github.io/permissions/#dom-permissions-revoke
-    unsafe fn Revoke(&self, cx: *mut JSContext, permissionDesc: *mut JSObject) -> Rc<Promise> {
+    fn Revoke(&self, cx: JSContext, permissionDesc: *mut JSObject) -> Rc<Promise> {
         self.manipulate(Operation::Revoke, cx, permissionDesc, None)
     }
 }
@@ -220,27 +222,24 @@ impl PermissionAlgorithm for Permissions {
     type Descriptor = PermissionDescriptor;
     type Status = PermissionStatus;
 
-    #[allow(unsafe_code)]
     fn create_descriptor(
-        cx: *mut JSContext,
+        cx: JSContext,
         permission_descriptor_obj: *mut JSObject,
     ) -> Result<PermissionDescriptor, Error> {
-        rooted!(in(cx) let mut property = UndefinedValue());
+        rooted!(in(*cx) let mut property = UndefinedValue());
         property
             .handle_mut()
             .set(ObjectValue(permission_descriptor_obj));
-        unsafe {
-            match PermissionDescriptor::new(cx, property.handle()) {
-                Ok(ConversionResult::Success(descriptor)) => Ok(descriptor),
-                Ok(ConversionResult::Failure(error)) => Err(Error::Type(error.into_owned())),
-                Err(_) => Err(Error::Type(String::from(ROOT_DESC_CONVERSION_ERROR))),
-            }
+        match PermissionDescriptor::new(cx, property.handle()) {
+            Ok(ConversionResult::Success(descriptor)) => Ok(descriptor),
+            Ok(ConversionResult::Failure(error)) => Err(Error::Type(error.into_owned())),
+            Err(_) => Err(Error::JSFailed),
         }
     }
 
     // https://w3c.github.io/permissions/#boolean-permission-query-algorithm
     fn permission_query(
-        _cx: *mut JSContext,
+        _cx: JSContext,
         _promise: &Rc<Promise>,
         _descriptor: &PermissionDescriptor,
         status: &PermissionStatus,
@@ -251,7 +250,7 @@ impl PermissionAlgorithm for Permissions {
 
     // https://w3c.github.io/permissions/#boolean-permission-request-algorithm
     fn permission_request(
-        cx: *mut JSContext,
+        cx: JSContext,
         promise: &Rc<Promise>,
         descriptor: &PermissionDescriptor,
         status: &PermissionStatus,
@@ -263,14 +262,15 @@ impl PermissionAlgorithm for Permissions {
             // Step 3.
             PermissionState::Prompt => {
                 let perm_name = status.get_query();
-                // https://w3c.github.io/permissions/#request-permission-to-use (Step 3 - 4)
-                let state = prompt_user(&format!(
-                    "{} {} ?",
-                    REQUEST_DIALOG_MESSAGE,
-                    perm_name.clone()
-                ));
 
                 let globalscope = GlobalScope::current().expect("No current global object");
+
+                // https://w3c.github.io/permissions/#request-permission-to-use (Step 3 - 4)
+                let state = prompt_user(
+                    &format!("{} {} ?", REQUEST_DIALOG_MESSAGE, perm_name.clone()),
+                    globalscope.is_headless(),
+                );
+
                 globalscope
                     .as_window()
                     .permission_state_invocation_results()
@@ -316,10 +316,11 @@ pub fn get_descriptor_permission_state(
                 .permission_state_invocation_results()
                 .borrow_mut()
                 .remove(&permission_name.to_string());
-            prompt_user(&format!(
-                "The {} {}",
-                permission_name, NONSECURE_DIALOG_MESSAGE
-            ))
+
+            prompt_user(
+                &format!("The {} {}", permission_name, NONSECURE_DIALOG_MESSAGE),
+                settings.is_headless(),
+            )
         }
     };
 
@@ -345,8 +346,8 @@ pub fn get_descriptor_permission_state(
 }
 
 #[cfg(target_os = "linux")]
-fn prompt_user(message: &str) -> PermissionState {
-    if opts::get().headless {
+fn prompt_user(message: &str, headless: bool) -> PermissionState {
+    if headless {
         return PermissionState::Denied;
     }
     match tinyfiledialogs::message_box_yes_no(
@@ -361,7 +362,7 @@ fn prompt_user(message: &str) -> PermissionState {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn prompt_user(_message: &str) -> PermissionState {
+fn prompt_user(_message: &str, _headless: bool) -> PermissionState {
     // TODO popup only supported on linux
     PermissionState::Denied
 }

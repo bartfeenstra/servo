@@ -12,6 +12,7 @@
  * liability, trademark and document use rules apply.
  */
 
+[Exposed=Window]
 interface Element : Node {
   [Constant]
   readonly attribute DOMString? namespaceURI;
@@ -81,6 +82,8 @@ interface Element : Node {
   void insertAdjacentText(DOMString where_, DOMString data);
   [CEReactions, Throws]
   void insertAdjacentHTML(DOMString position, DOMString html);
+
+  [Throws, Pref="dom.shadowdom.enabled"] ShadowRoot attachShadow();
 };
 
 // http://dev.w3.org/csswg/cssom-view/#extensions-to-the-element-interface
@@ -89,12 +92,12 @@ partial interface Element {
   [NewObject]
   DOMRect getBoundingClientRect();
 
-  void scroll(optional ScrollToOptions options);
+  void scroll(optional ScrollToOptions options = {});
   void scroll(unrestricted double x, unrestricted double y);
 
-  void scrollTo(optional ScrollToOptions options);
+  void scrollTo(optional ScrollToOptions options = {});
   void scrollTo(unrestricted double x, unrestricted double y);
-  void scrollBy(optional ScrollToOptions options);
+  void scrollBy(optional ScrollToOptions options = {});
   void scrollBy(unrestricted double x, unrestricted double y);
   attribute unrestricted double scrollTop;
   attribute unrestricted double scrollLeft;
@@ -120,7 +123,7 @@ partial interface Element {
   Promise<void> requestFullscreen();
 };
 
-Element implements ChildNode;
-Element implements NonDocumentTypeChildNode;
-Element implements ParentNode;
-Element implements ActivatableElement;
+Element includes ChildNode;
+Element includes NonDocumentTypeChildNode;
+Element includes ParentNode;
+Element includes ActivatableElement;

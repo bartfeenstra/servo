@@ -10,7 +10,7 @@ use crate::dom::document::{determine_policy_for_token, Document};
 use crate::dom::element::Element;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::htmlmetaelement::HTMLMetaElement;
-use crate::dom::node::{document_from_node, Node};
+use crate::dom::node::{document_from_node, BindContext, Node, ShadowIncluding};
 use crate::dom::userscripts::load_script;
 use crate::dom::virtualmethods::VirtualMethods;
 use dom_struct::dom_struct;
@@ -49,13 +49,13 @@ impl HTMLHeadElement {
     pub fn set_document_referrer(&self) {
         let doc = document_from_node(self);
 
-        if doc.GetHead().deref() != Some(self) {
+        if doc.GetHead().as_deref() != Some(self) {
             return;
         }
 
         let node = self.upcast::<Node>();
         let candidates = node
-            .traverse_preorder()
+            .traverse_preorder(ShadowIncluding::No)
             .filter_map(DomRoot::downcast::<Element>)
             .filter(|elem| elem.is::<HTMLMetaElement>())
             .filter(|elem| elem.get_string_attribute(&local_name!("name")) == "referrer")
@@ -81,9 +81,9 @@ impl VirtualMethods for HTMLHeadElement {
     fn super_type(&self) -> Option<&dyn VirtualMethods> {
         Some(self.upcast::<HTMLElement>() as &dyn VirtualMethods)
     }
-    fn bind_to_tree(&self, tree_in_doc: bool) {
+    fn bind_to_tree(&self, context: &BindContext) {
         if let Some(ref s) = self.super_type() {
-            s.bind_to_tree(tree_in_doc);
+            s.bind_to_tree(context);
         }
         load_script(self);
     }

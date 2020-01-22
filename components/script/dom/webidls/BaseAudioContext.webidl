@@ -31,7 +31,7 @@ interface BaseAudioContext : EventTarget {
                                        optional DecodeSuccessCallback successCallback,
                                        optional DecodeErrorCallback errorCallback);
   [Throws] AudioBufferSourceNode createBufferSource();
-  // ConstantSourceNode createConstantSource();
+  [Throws] ConstantSourceNode createConstantSource();
   // ScriptProcessorNode createScriptProcessor(optional unsigned long bufferSize = 0,
   //                                           optional unsigned long numberOfInputChannels = 2,
   //                                           optional unsigned long numberOfOutputChannels = 2);
@@ -43,7 +43,7 @@ interface BaseAudioContext : EventTarget {
   //                               sequence<double> feedback);
   // WaveShaperNode createWaveShaper();
   [Throws] PannerNode createPanner();
-  // StereoPannerNode createStereoPanner();
+  [Throws] StereoPannerNode createStereoPanner();
   // ConvolverNode createConvolver();
   [Throws] ChannelSplitterNode createChannelSplitter(optional unsigned long numberOfOutputs = 6);
   [Throws] ChannelMergerNode createChannelMerger(optional unsigned long numberOfInputs = 6);

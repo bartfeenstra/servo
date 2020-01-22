@@ -24,12 +24,16 @@ use crate::dom::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::htmlformelement::{FormControl, HTMLFormElement};
 use crate::dom::keyboardevent::KeyboardEvent;
 use crate::dom::node::{document_from_node, window_from_node};
-use crate::dom::node::{ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, UnbindContext};
+use crate::dom::node::{
+    BindContext, ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, UnbindContext,
+};
 use crate::dom::nodelist::NodeList;
 use crate::dom::textcontrol::{TextControlElement, TextControlSelection};
 use crate::dom::validation::Validatable;
 use crate::dom::virtualmethods::VirtualMethods;
-use crate::textinput::{Direction, KeyReaction, Lines, SelectionDirection, TextInput};
+use crate::textinput::{
+    Direction, KeyReaction, Lines, SelectionDirection, TextInput, UTF16CodeUnits, UTF8Bytes,
+};
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix};
 use script_traits::ScriptToConstellationChan;
@@ -48,6 +52,7 @@ pub struct HTMLTextAreaElement {
     // https://html.spec.whatwg.org/multipage/#concept-textarea-dirty
     value_dirty: Cell<bool>,
     form_owner: MutNullableDom<HTMLFormElement>,
+    labels_node_list: MutNullableDom<NodeList>,
 }
 
 pub trait LayoutHTMLTextAreaElementHelpers {
@@ -87,7 +92,9 @@ impl LayoutHTMLTextAreaElementHelpers for LayoutDom<HTMLTextAreaElement> {
             return None;
         }
         let textinput = (*self.unsafe_get()).textinput.borrow_for_layout();
-        Some(textinput.sorted_selection_offsets_range())
+        Some(UTF8Bytes::unwrap_range(
+            textinput.sorted_selection_offsets_range(),
+        ))
     }
 
     #[allow(unsafe_code)]
@@ -147,6 +154,7 @@ impl HTMLTextAreaElement {
             )),
             value_dirty: Cell::new(false),
             form_owner: Default::default(),
+            labels_node_list: Default::default(),
         }
     }
 
@@ -305,13 +313,12 @@ impl HTMLTextAreaElementMethods for HTMLTextAreaElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-textarea-textlength
     fn TextLength(&self) -> u32 {
-        self.textinput.borrow().utf16_len() as u32
+        let UTF16CodeUnits(num_units) = self.textinput.borrow().utf16_len();
+        num_units as u32
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-lfe-labels
-    fn Labels(&self) -> DomRoot<NodeList> {
-        self.upcast::<HTMLElement>().labels()
-    }
+    make_labels_getter!(Labels, labels_node_list);
 
     // https://html.spec.whatwg.org/multipage/#dom-textarea/input-select
     fn Select(&self) {
@@ -421,7 +428,7 @@ impl VirtualMethods for HTMLTextAreaElement {
                     if value < 0 {
                         textinput.set_max_length(None);
                     } else {
-                        textinput.set_max_length(Some(value as usize))
+                        textinput.set_max_length(Some(UTF16CodeUnits(value as usize)))
                     }
                 },
                 _ => panic!("Expected an AttrValue::Int"),
@@ -433,7 +440,7 @@ impl VirtualMethods for HTMLTextAreaElement {
                     if value < 0 {
                         textinput.set_min_length(None);
                     } else {
-                        textinput.set_min_length(Some(value as usize))
+                        textinput.set_min_length(Some(UTF16CodeUnits(value as usize)))
                     }
                 },
                 _ => panic!("Expected an AttrValue::Int"),
@@ -466,9 +473,9 @@ impl VirtualMethods for HTMLTextAreaElement {
         }
     }
 
-    fn bind_to_tree(&self, tree_in_doc: bool) {
+    fn bind_to_tree(&self, context: &BindContext) {
         if let Some(ref s) = self.super_type() {
-            s.bind_to_tree(tree_in_doc);
+            s.bind_to_tree(context);
         }
 
         self.upcast::<Element>()

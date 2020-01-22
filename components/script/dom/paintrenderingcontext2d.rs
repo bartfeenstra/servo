@@ -21,14 +21,12 @@ use crate::dom::canvasgradient::CanvasGradient;
 use crate::dom::canvaspattern::CanvasPattern;
 use crate::dom::canvasrenderingcontext2d::CanvasRenderingContext2D;
 use crate::dom::paintworkletglobalscope::PaintWorkletGlobalScope;
-use crate::dom::workletglobalscope::WorkletGlobalScope;
+use crate::euclidext::Size2DExt;
 use canvas_traits::canvas::CanvasImageData;
 use canvas_traits::canvas::CanvasMsg;
 use canvas_traits::canvas::FromLayoutMsg;
 use dom_struct::dom_struct;
-use euclid::Size2D;
-use euclid::TypedScale;
-use euclid::TypedSize2D;
+use euclid::{Scale, Size2D};
 use ipc_channel::ipc::IpcSender;
 use servo_url::ServoUrl;
 use std::cell::Cell;
@@ -38,23 +36,15 @@ use style_traits::DevicePixel;
 #[dom_struct]
 pub struct PaintRenderingContext2D {
     context: CanvasRenderingContext2D,
-    device_pixel_ratio: Cell<TypedScale<f32, CSSPixel, DevicePixel>>,
+    device_pixel_ratio: Cell<Scale<f32, CSSPixel, DevicePixel>>,
 }
 
 impl PaintRenderingContext2D {
     fn new_inherited(global: &PaintWorkletGlobalScope) -> PaintRenderingContext2D {
         let size = Size2D::zero();
-        let image_cache = global.image_cache();
-        let base_url = global.upcast::<WorkletGlobalScope>().base_url();
         PaintRenderingContext2D {
-            context: CanvasRenderingContext2D::new_inherited(
-                global.upcast(),
-                None,
-                image_cache,
-                base_url,
-                size,
-            ),
-            device_pixel_ratio: Cell::new(TypedScale::new(1.0)),
+            context: CanvasRenderingContext2D::new_inherited(global.upcast(), None, size),
+            device_pixel_ratio: Cell::new(Scale::new(1.0)),
         }
     }
 
@@ -80,13 +70,13 @@ impl PaintRenderingContext2D {
 
     pub fn set_bitmap_dimensions(
         &self,
-        size: TypedSize2D<f32, CSSPixel>,
-        device_pixel_ratio: TypedScale<f32, CSSPixel, DevicePixel>,
+        size: Size2D<f32, CSSPixel>,
+        device_pixel_ratio: Scale<f32, CSSPixel, DevicePixel>,
     ) {
         let size = size * device_pixel_ratio;
         self.device_pixel_ratio.set(device_pixel_ratio);
         self.context
-            .set_bitmap_dimensions(size.to_untyped().to_u32());
+            .set_canvas_bitmap_dimensions(size.to_untyped().to_u64());
         self.scale_by_device_pixel_ratio();
     }
 

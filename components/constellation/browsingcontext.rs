@@ -3,8 +3,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use crate::pipeline::Pipeline;
-use euclid::TypedSize2D;
-use msg::constellation_msg::{BrowsingContextId, PipelineId, TopLevelBrowsingContextId};
+use euclid::Size2D;
+use msg::constellation_msg::{
+    BrowsingContextGroupId, BrowsingContextId, PipelineId, TopLevelBrowsingContextId,
+};
 use std::collections::{HashMap, HashSet};
 use style_traits::CSSPixel;
 
@@ -34,6 +36,9 @@ pub struct NewBrowsingContextInfo {
 /// sorted reverse chronologically: in particular prev.pop() is the latest
 /// past entry, and next.pop() is the earliest future entry.
 pub struct BrowsingContext {
+    /// The browsing context group id where the top-level of this bc is found.
+    pub bc_group_id: BrowsingContextGroupId,
+
     /// The browsing context id.
     pub id: BrowsingContextId,
 
@@ -41,7 +46,7 @@ pub struct BrowsingContext {
     pub top_level_id: TopLevelBrowsingContextId,
 
     /// The size of the frame.
-    pub size: TypedSize2D<f32, CSSPixel>,
+    pub size: Size2D<f32, CSSPixel>,
 
     /// Whether this browsing context is in private browsing mode.
     pub is_private: bool,
@@ -66,25 +71,27 @@ impl BrowsingContext {
     /// Create a new browsing context.
     /// Note this just creates the browsing context, it doesn't add it to the constellation's set of browsing contexts.
     pub fn new(
+        bc_group_id: BrowsingContextGroupId,
         id: BrowsingContextId,
         top_level_id: TopLevelBrowsingContextId,
         pipeline_id: PipelineId,
         parent_pipeline_id: Option<PipelineId>,
-        size: TypedSize2D<f32, CSSPixel>,
+        size: Size2D<f32, CSSPixel>,
         is_private: bool,
         is_visible: bool,
     ) -> BrowsingContext {
         let mut pipelines = HashSet::new();
         pipelines.insert(pipeline_id);
         BrowsingContext {
-            id: id,
-            top_level_id: top_level_id,
-            size: size,
-            is_private: is_private,
-            is_visible: is_visible,
-            pipeline_id: pipeline_id,
-            parent_pipeline_id: parent_pipeline_id,
-            pipelines: pipelines,
+            bc_group_id,
+            id,
+            top_level_id,
+            size,
+            is_private,
+            is_visible,
+            pipeline_id,
+            parent_pipeline_id,
+            pipelines,
         }
     }
 

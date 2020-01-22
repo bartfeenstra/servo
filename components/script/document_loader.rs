@@ -25,24 +25,11 @@ pub enum LoadType {
     Media,
 }
 
-impl LoadType {
-    fn url(&self) -> Option<&ServoUrl> {
-        match *self {
-            LoadType::Image(ref url) |
-            LoadType::Script(ref url) |
-            LoadType::Subframe(ref url) |
-            LoadType::Stylesheet(ref url) |
-            LoadType::PageSource(ref url) => Some(url),
-            LoadType::Media => None,
-        }
-    }
-}
-
 /// Canary value ensuring that manually added blocking loads (ie. ones that weren't
 /// created via DocumentLoader::fetch_async) are always removed by the time
 /// that the owner is destroyed.
 #[derive(JSTraceable, MallocSizeOf)]
-#[must_root]
+#[unrooted_must_root_lint::must_root]
 pub struct LoadBlocker {
     /// The document whose load event is blocked by this object existing.
     doc: Dom<Document>,
@@ -66,11 +53,6 @@ impl LoadBlocker {
             this.doc.finish_load(this.load.take().unwrap());
         }
         *blocker = None;
-    }
-
-    /// Return the url associated with this load.
-    pub fn url(&self) -> Option<&ServoUrl> {
-        self.load.as_ref().and_then(LoadType::url)
     }
 }
 

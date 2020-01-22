@@ -10,13 +10,12 @@ use crate::dom::paintworkletglobalscope::PaintWorkletTask;
 use crate::dom::testworkletglobalscope::TestWorkletGlobalScope;
 use crate::dom::testworkletglobalscope::TestWorkletTask;
 use crate::dom::worklet::WorkletExecutor;
+use crate::script_runtime::JSContext;
 use crate::script_thread::MainThreadScriptMsg;
 use crossbeam_channel::Sender;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use dom_struct::dom_struct;
-use ipc_channel::ipc;
 use ipc_channel::ipc::IpcSender;
-use js::jsapi::JSContext;
 use js::jsval::UndefinedValue;
 use js::rust::Runtime;
 use msg::constellation_msg::PipelineId;
@@ -30,6 +29,7 @@ use servo_atoms::Atom;
 use servo_url::ImmutableOrigin;
 use servo_url::MutableOrigin;
 use servo_url::ServoUrl;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 #[dom_struct]
@@ -54,8 +54,6 @@ impl WorkletGlobalScope {
         executor: WorkletExecutor,
         init: &WorkletGlobalScopeInit,
     ) -> Self {
-        // Any timer events fired on this global are ignored.
-        let (timer_event_chan, _) = ipc::channel().unwrap();
         let script_to_constellation_chan = ScriptToConstellationChan {
             sender: init.to_constellation_sender.clone(),
             pipeline_id,
@@ -69,9 +67,10 @@ impl WorkletGlobalScope {
                 script_to_constellation_chan,
                 init.scheduler_chan.clone(),
                 init.resource_threads.clone(),
-                timer_event_chan,
                 MutableOrigin::new(ImmutableOrigin::new_opaque()),
                 Default::default(),
+                init.is_headless,
+                init.user_agent.clone(),
             ),
             base_url,
             to_script_thread_sender: init.to_script_thread_sender.clone(),
@@ -80,14 +79,14 @@ impl WorkletGlobalScope {
     }
 
     /// Get the JS context.
-    pub fn get_cx(&self) -> *mut JSContext {
+    pub fn get_cx(&self) -> JSContext {
         self.globalscope.get_cx()
     }
 
     /// Evaluate a JS script in this global.
     pub fn evaluate_js(&self, script: &str) -> bool {
         debug!("Evaluating Dom.");
-        rooted!(in (self.globalscope.get_cx()) let mut rval = UndefinedValue());
+        rooted!(in (*self.globalscope.get_cx()) let mut rval = UndefinedValue());
         self.globalscope
             .evaluate_js_on_global_with_result(&*script, rval.handle_mut())
     }
@@ -153,6 +152,10 @@ pub struct WorkletGlobalScopeInit {
     pub scheduler_chan: IpcSender<TimerSchedulerMsg>,
     /// The image cache
     pub image_cache: Arc<dyn ImageCache>,
+    /// True if in headless mode
+    pub is_headless: bool,
+    /// An optional string allowing the user agent to be set for testing
+    pub user_agent: Cow<'static, str>,
 }
 
 /// <https://drafts.css-houdini.org/worklets/#worklet-global-scope-type>

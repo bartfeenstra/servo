@@ -10,47 +10,40 @@ enum XREnvironmentBlendMode {
   "alpha-blend",
 };
 
+enum XRVisibilityState {
+  "visible",
+  "visible-blurred",
+  "hidden",
+};
+
 callback XRFrameRequestCallback = void (DOMHighResTimeStamp time, XRFrame frame);
 
 [SecureContext, Exposed=Window, Pref="dom.webxr.enabled"]
 interface XRSession : EventTarget {
   // // Attributes
-  readonly attribute XRSessionMode mode;
-  // readonly attribute XRPresentationContext outputContext;
   readonly attribute XREnvironmentBlendMode environmentBlendMode;
 
-  readonly attribute XRRenderState renderState;
-  readonly attribute XRSpace viewerSpace;
+  readonly attribute XRVisibilityState visibilityState;
+  [SameObject] readonly attribute XRRenderState renderState;
+  [SameObject] readonly attribute XRInputSourceArray inputSources;
 
   // // Methods
-  Promise<XRReferenceSpace> requestReferenceSpace(XRReferenceSpaceOptions options);
+  [Throws] void updateRenderState(optional XRRenderStateInit state = {});
+  Promise<XRReferenceSpace> requestReferenceSpace(XRReferenceSpaceType type);
 
-  // FrozenArray<XRInputSource> getInputSources();
-
-  Promise<void> updateRenderState(optional XRRenderStateInit state);
   long requestAnimationFrame(XRFrameRequestCallback callback);
   void cancelAnimationFrame(long handle);
 
-  // Promise<void> end();
+  Promise<void> end();
 
   // // Events
-  // attribute EventHandler onblur;
-  // attribute EventHandler onfocus;
-  // attribute EventHandler onend;
-  // attribute EventHandler onselect;
-  // attribute EventHandler oninputsourceschange;
-  // attribute EventHandler onselectstart;
-  // attribute EventHandler onselectend;
-};
-
-enum XRReferenceSpaceType {
-  "identity",
-  "stationary",
-  "bounded",
-  "unbounded"
-};
-
-dictionary XRReferenceSpaceOptions {
-  required XRReferenceSpaceType type;
-  XRStationaryReferenceSpaceSubtype subtype;
+  attribute EventHandler onend;
+  attribute EventHandler onselect;
+  attribute EventHandler onsqueeze;
+  attribute EventHandler oninputsourceschange;
+  attribute EventHandler onselectstart;
+  attribute EventHandler onselectend;
+  attribute EventHandler onsqueezestart;
+  attribute EventHandler onsqueezeend;
+  attribute EventHandler onvisibilitychange;
 };

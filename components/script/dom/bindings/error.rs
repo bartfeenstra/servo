@@ -6,7 +6,6 @@
 
 #[cfg(feature = "js_backtrace")]
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::DOMExceptionBinding::DOMExceptionMethods;
 use crate::dom::bindings::codegen::PrototypeList::proto_id_to_name;
 use crate::dom::bindings::conversions::root_from_object;
 use crate::dom::bindings::conversions::{
@@ -15,6 +14,7 @@ use crate::dom::bindings::conversions::{
 use crate::dom::bindings::str::USVString;
 use crate::dom::domexception::{DOMErrorName, DOMException};
 use crate::dom::globalscope::GlobalScope;
+use crate::script_runtime::JSContext as SafeJSContext;
 #[cfg(feature = "js_backtrace")]
 use backtrace::Backtrace;
 use js::error::{throw_range_error, throw_type_error};
@@ -84,6 +84,8 @@ pub enum Error {
     InvalidModification,
     /// NotReadableError DOMException
     NotReadable,
+    /// OperationError DOMException
+    Operation,
 
     /// TypeError JavaScript Error
     Type(String),
@@ -102,10 +104,10 @@ pub type Fallible<T> = Result<T, Error>;
 pub type ErrorResult = Fallible<()>;
 
 /// Set a pending exception for the given `result` on `cx`.
-pub unsafe fn throw_dom_exception(cx: *mut JSContext, global: &GlobalScope, result: Error) {
+pub fn throw_dom_exception(cx: SafeJSContext, global: &GlobalScope, result: Error) {
     #[cfg(feature = "js_backtrace")]
     {
-        capture_stack!(in(cx) let stack);
+        capture_stack!(in(*cx) let stack);
         let js_stack = stack.and_then(|s| s.as_string(None));
         let rust_stack = Backtrace::new();
         LAST_EXCEPTION_BACKTRACE.with(|backtrace| {
@@ -136,27 +138,30 @@ pub unsafe fn throw_dom_exception(cx: *mut JSContext, global: &GlobalScope, resu
         Error::TypeMismatch => DOMErrorName::TypeMismatchError,
         Error::InvalidModification => DOMErrorName::InvalidModificationError,
         Error::NotReadable => DOMErrorName::NotReadableError,
-        Error::Type(message) => {
-            assert!(!JS_IsExceptionPending(cx));
-            throw_type_error(cx, &message);
+        Error::Operation => DOMErrorName::OperationError,
+        Error::Type(message) => unsafe {
+            assert!(!JS_IsExceptionPending(*cx));
+            throw_type_error(*cx, &message);
             return;
         },
-        Error::Range(message) => {
-            assert!(!JS_IsExceptionPending(cx));
-            throw_range_error(cx, &message);
+        Error::Range(message) => unsafe {
+            assert!(!JS_IsExceptionPending(*cx));
+            throw_range_error(*cx, &message);
             return;
         },
-        Error::JSFailed => {
-            assert!(JS_IsExceptionPending(cx));
+        Error::JSFailed => unsafe {
+            assert!(JS_IsExceptionPending(*cx));
             return;
         },
     };
 
-    assert!(!JS_IsExceptionPending(cx));
-    let exception = DOMException::new(global, code);
-    rooted!(in(cx) let mut thrown = UndefinedValue());
-    exception.to_jsval(cx, thrown.handle_mut());
-    JS_SetPendingException(cx, thrown.handle());
+    unsafe {
+        assert!(!JS_IsExceptionPending(*cx));
+        let exception = DOMException::new(global, code);
+        rooted!(in(*cx) let mut thrown = UndefinedValue());
+        exception.to_jsval(*cx, thrown.handle_mut());
+        JS_SetPendingException(*cx, thrown.handle());
+    }
 }
 
 /// A struct encapsulating information about a runtime script error.
@@ -207,15 +212,15 @@ impl ErrorInfo {
         })
     }
 
-    fn from_dom_exception(object: HandleObject) -> Option<ErrorInfo> {
-        let exception = match root_from_object::<DOMException>(object.get()) {
+    fn from_dom_exception(object: HandleObject, cx: *mut JSContext) -> Option<ErrorInfo> {
+        let exception = match root_from_object::<DOMException>(object.get(), cx) {
             Ok(exception) => exception,
             Err(_) => return None,
         };
 
         Some(ErrorInfo {
             filename: "".to_string(),
-            message: exception.Stringifier().into(),
+            message: exception.stringifier().into(),
             lineno: 0,
             column: 0,
         })
@@ -242,7 +247,7 @@ pub unsafe fn report_pending_exception(cx: *mut JSContext, dispatch_event: bool)
     let error_info = if value.is_object() {
         rooted!(in(cx) let object = value.to_object());
         ErrorInfo::from_native_error(cx, object.handle())
-            .or_else(|| ErrorInfo::from_dom_exception(object.handle()))
+            .or_else(|| ErrorInfo::from_dom_exception(object.handle(), cx))
             .unwrap_or_else(|| ErrorInfo {
                 message: format!("uncaught exception: unknown (can't convert to string)"),
                 filename: String::new(),
@@ -303,8 +308,11 @@ impl Error {
         global: &GlobalScope,
         rval: MutableHandleValue,
     ) {
-        assert!(!JS_IsExceptionPending(cx));
-        throw_dom_exception(cx, global, self);
+        match self {
+            Error::JSFailed => (),
+            _ => assert!(!JS_IsExceptionPending(cx)),
+        }
+        throw_dom_exception(SafeJSContext::from_ptr(cx), global, self);
         assert!(JS_IsExceptionPending(cx));
         assert!(JS_GetPendingException(cx, rval));
         JS_ClearPendingException(cx);

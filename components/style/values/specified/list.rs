@@ -6,11 +6,10 @@
 
 use crate::parser::{Parse, ParserContext};
 #[cfg(feature = "gecko")]
-use crate::values::generics::CounterStyleOrNone;
+use crate::values::generics::CounterStyle;
 #[cfg(feature = "gecko")]
 use crate::values::CustomIdent;
 use cssparser::{Parser, Token};
-use servo_arc::Arc;
 use style_traits::{ParseError, StyleParseErrorKind};
 
 /// Specified and computed `list-style-type` property.
@@ -28,8 +27,10 @@ use style_traits::{ParseError, StyleParseErrorKind};
     ToShmem,
 )]
 pub enum ListStyleType {
-    /// <counter-style> | none
-    CounterStyle(CounterStyleOrNone),
+    /// `none`
+    None,
+    /// <counter-style>
+    CounterStyle(CounterStyle),
     /// <string>
     String(String),
 }
@@ -39,7 +40,7 @@ impl ListStyleType {
     /// Initial specified value for `list-style-type`.
     #[inline]
     pub fn disc() -> Self {
-        ListStyleType::CounterStyle(CounterStyleOrNone::disc())
+        ListStyleType::CounterStyle(CounterStyle::disc())
     }
 
     /// Convert from gecko keyword to list-style-type.
@@ -51,10 +52,10 @@ impl ListStyleType {
         use crate::gecko_bindings::structs;
 
         if value == structs::NS_STYLE_LIST_STYLE_NONE {
-            return ListStyleType::CounterStyle(CounterStyleOrNone::None);
+            return ListStyleType::None;
         }
 
-        ListStyleType::CounterStyle(CounterStyleOrNone::Name(CustomIdent(match value {
+        ListStyleType::CounterStyle(CounterStyle::Name(CustomIdent(match value {
             structs::NS_STYLE_LIST_STYLE_DISC => atom!("disc"),
             structs::NS_STYLE_LIST_STYLE_CIRCLE => atom!("circle"),
             structs::NS_STYLE_LIST_STYLE_SQUARE => atom!("square"),
@@ -74,10 +75,12 @@ impl Parse for ListStyleType {
         context: &ParserContext,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self, ParseError<'i>> {
-        if let Ok(style) = input.try(|i| CounterStyleOrNone::parse(context, i)) {
+        if let Ok(style) = input.try(|i| CounterStyle::parse(context, i)) {
             return Ok(ListStyleType::CounterStyle(style));
         }
-
+        if input.try(|i| i.expect_ident_matching("none")).is_ok() {
+            return Ok(ListStyleType::None);
+        }
         Ok(ListStyleType::String(
             input.expect_string()?.as_ref().to_owned(),
         ))
@@ -96,15 +99,37 @@ impl Parse for ListStyleType {
     ToResolvedValue,
     ToShmem,
 )]
+#[repr(C)]
 pub struct QuotePair {
     /// The opening quote.
-    pub opening: Box<str>,
+    pub opening: crate::OwnedStr,
 
     /// The closing quote.
-    pub closing: Box<str>,
+    pub closing: crate::OwnedStr,
 }
 
-/// Specified and computed `quotes` property.
+/// List of quote pairs for the specified/computed value of `quotes` property.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    MallocSizeOf,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(transparent)]
+pub struct QuoteList(
+    #[css(iterable, if_empty = "none")]
+    #[ignore_malloc_size_of = "Arc"]
+    pub crate::ArcSlice<QuotePair>,
+);
+
+/// Specified and computed `quotes` property: `auto`, `none`, or a list
+/// of characters.
 #[derive(
     Clone,
     Debug,
@@ -116,11 +141,13 @@ pub struct QuotePair {
     ToResolvedValue,
     ToShmem,
 )]
-pub struct Quotes(
-    #[css(iterable, if_empty = "none")]
-    #[ignore_malloc_size_of = "Arc"]
-    pub Arc<Box<[QuotePair]>>,
-);
+#[repr(C)]
+pub enum Quotes {
+    /// list of quote pairs
+    QuoteList(QuoteList),
+    /// auto (use lang-dependent quote marks)
+    Auto,
+}
 
 impl Parse for Quotes {
     fn parse<'i, 't>(
@@ -128,27 +155,36 @@ impl Parse for Quotes {
         input: &mut Parser<'i, 't>,
     ) -> Result<Quotes, ParseError<'i>> {
         if input
+            .try(|input| input.expect_ident_matching("auto"))
+            .is_ok()
+        {
+            return Ok(Quotes::Auto);
+        }
+
+        if input
             .try(|input| input.expect_ident_matching("none"))
             .is_ok()
         {
-            return Ok(Quotes(Arc::new(Box::new([]))));
+            return Ok(Quotes::QuoteList(QuoteList::default()));
         }
 
         let mut quotes = Vec::new();
         loop {
             let location = input.current_source_location();
             let opening = match input.next() {
-                Ok(&Token::QuotedString(ref value)) => value.as_ref().to_owned().into_boxed_str(),
+                Ok(&Token::QuotedString(ref value)) => value.as_ref().to_owned().into(),
                 Ok(t) => return Err(location.new_unexpected_token_error(t.clone())),
                 Err(_) => break,
             };
 
-            let closing = input.expect_string()?.as_ref().to_owned().into_boxed_str();
+            let closing = input.expect_string()?.as_ref().to_owned().into();
             quotes.push(QuotePair { opening, closing });
         }
 
         if !quotes.is_empty() {
-            Ok(Quotes(Arc::new(quotes.into_boxed_slice())))
+            Ok(Quotes::QuoteList(QuoteList(crate::ArcSlice::from_iter(
+                quotes.into_iter(),
+            ))))
         } else {
             Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
         }

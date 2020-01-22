@@ -11,6 +11,9 @@ RUN \
         make \
         cmake \
         #
+        # Fontconfig
+        gperf \
+        #
         # ANGLE
         xorg-dev \
         #
@@ -19,12 +22,14 @@ RUN \
         #
         # Bindgen (for SpiderMonkey bindings)
         clang \
+        llvm \
+        llvm-dev \
         #
         # GStreamer
         libgstreamer-plugins-bad1.0-dev \
         #
         # OpenSSL
-        libssl1.0-dev \
+        libssl-dev \
         #
         # blurz
         libdbus-1-dev \
@@ -39,11 +44,12 @@ RUN \
         #
     && \
     #
-    #
-    curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain none -y && \
+    # Install the version of rustup that is current when this Docker image is being built:
+    # We want at least 1.21 (increment in this comment to force an image rebuild).
+    curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain none --profile=minimal -y && \
     #
     #
     curl -sSfL \
-        https://github.com/mozilla/sccache/releases/download/0.2.7/sccache-0.2.7-x86_64-unknown-linux-musl.tar.gz \
+        https://github.com/mozilla/sccache/releases/download/0.2.12/sccache-0.2.12-x86_64-unknown-linux-musl.tar.gz \
         | tar -xz --strip-components=1 -C /usr/local/bin/ \
-            sccache-0.2.7-x86_64-unknown-linux-musl/sccache
+            sccache-0.2.12-x86_64-unknown-linux-musl/sccache

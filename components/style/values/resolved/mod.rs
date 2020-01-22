@@ -65,6 +65,7 @@ trivial_to_resolved_value!(u8);
 trivial_to_resolved_value!(i8);
 trivial_to_resolved_value!(u16);
 trivial_to_resolved_value!(u32);
+trivial_to_resolved_value!(usize);
 trivial_to_resolved_value!(String);
 trivial_to_resolved_value!(Box<str>);
 trivial_to_resolved_value!(cssparser::RGBA);
@@ -191,5 +192,22 @@ where
     #[inline]
     fn from_resolved_value(resolved: Self::ResolvedValue) -> Self {
         Vec::from_resolved_value(Vec::from(resolved)).into_boxed_slice()
+    }
+}
+
+impl<T> ToResolvedValue for crate::OwnedSlice<T>
+where
+    T: ToResolvedValue,
+{
+    type ResolvedValue = crate::OwnedSlice<<T as ToResolvedValue>::ResolvedValue>;
+
+    #[inline]
+    fn to_resolved_value(self, context: &Context) -> Self::ResolvedValue {
+        self.into_box().to_resolved_value(context).into()
+    }
+
+    #[inline]
+    fn from_resolved_value(resolved: Self::ResolvedValue) -> Self {
+        Self::from(Box::from_resolved_value(resolved.into_box()))
     }
 }

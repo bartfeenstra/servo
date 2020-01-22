@@ -3,11 +3,12 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use app_units::Au;
-use euclid::{Point2D, Rect};
+use euclid::default::Rect;
+use euclid::Size2D;
 use script_traits::UntrustedNodeAddress;
 use servo_arc::Arc;
-use style::properties::longhands::overflow_x;
 use style::properties::ComputedValues;
+use style_traits::CSSPixel;
 use webrender_api::ExternalScrollId;
 
 /// Synchronous messages that script can send to layout.
@@ -40,6 +41,8 @@ pub trait LayoutRPC {
     fn nodes_from_point_response(&self) -> Vec<UntrustedNodeAddress>;
     /// Query layout to get the inner text for a given element.
     fn element_inner_text(&self) -> String;
+    /// Get the dimensions of an iframe's inner window.
+    fn inner_window_dimensions(&self) -> Option<Size2D<f32, CSSPixel>>;
 }
 
 pub struct ContentBoxResponse(pub Option<Rect<Au>>);
@@ -49,8 +52,6 @@ pub struct ContentBoxesResponse(pub Vec<Rect<Au>>);
 pub struct NodeGeometryResponse {
     pub client_rect: Rect<i32>,
 }
-
-pub struct NodeOverflowResponse(pub Option<Point2D<overflow_x::computed_value::T>>);
 
 pub struct NodeScrollIdResponse(pub ExternalScrollId);
 

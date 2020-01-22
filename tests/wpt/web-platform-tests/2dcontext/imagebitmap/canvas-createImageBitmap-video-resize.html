@@ -51,8 +51,9 @@ var t = async_test('createImageBitmap(HTMLVideoElement) with resize option');
 
 // HTMLVideoElement
 var video = document.createElement("video");
+video.preload = "auto";
 video.oncanplaythrough = t.step_func(function() {
     return generateTest();
 });
-video.src = "/media/video.ogv";
+video.src = '/media/counting.' + (video.canPlayType('video/ogg') ? 'ogv' : 'mp4');
 </script>

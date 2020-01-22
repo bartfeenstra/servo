@@ -141,6 +141,21 @@ macro_rules! make_form_action_getter(
 );
 
 #[macro_export]
+macro_rules! make_labels_getter(
+    ( $attr:ident, $memo:ident ) => (
+        fn $attr(&self) -> DomRoot<NodeList> {
+            use crate::dom::htmlelement::HTMLElement;
+            use crate::dom::nodelist::NodeList;
+            self.$memo.or_init(|| NodeList::new_labels_list(
+                self.upcast::<Node>().owner_doc().window(),
+                self.upcast::<HTMLElement>()
+                )
+            )
+        }
+    );
+);
+
+#[macro_export]
 macro_rules! make_enumerated_getter(
     ( $attr:ident, $htmlname:tt, $default:expr, $($choices: pat)|+) => (
         fn $attr(&self) -> DOMString {
@@ -446,6 +461,7 @@ macro_rules! global_event_handlers(
         event_handler!(emptied, GetOnemptied, SetOnemptied);
         event_handler!(ended, GetOnended, SetOnended);
         error_event_handler!(error, GetOnerror, SetOnerror);
+        event_handler!(formdata, GetOnformdata, SetOnformdata);
         event_handler!(input, GetOninput, SetOninput);
         event_handler!(invalid, GetOninvalid, SetOninvalid);
         event_handler!(keydown, GetOnkeydown, SetOnkeydown);
@@ -631,4 +647,43 @@ macro_rules! handle_potential_webgl_error {
     ($context:expr, $call:expr) => {
         handle_potential_webgl_error!($context, $call, ());
     };
+}
+
+macro_rules! impl_rare_data (
+    ($type:ty) => (
+        fn rare_data(&self) -> Ref<Option<Box<$type>>> {
+            self.rare_data.borrow()
+        }
+
+        #[allow(dead_code)]
+        fn rare_data_mut(&self) -> RefMut<Option<Box<$type>>> {
+            self.rare_data.borrow_mut()
+        }
+
+        fn ensure_rare_data(&self) -> RefMut<Box<$type>> {
+            let mut rare_data = self.rare_data.borrow_mut();
+            if rare_data.is_none() {
+                *rare_data = Some(Default::default());
+            }
+            RefMut::map(rare_data, |rare_data| {
+                rare_data.as_mut().unwrap()
+            })
+        }
+
+        #[allow(unsafe_code)]
+        fn rare_data_for_layout(&self) -> &Option<Box<$type>> {
+            unsafe { self.rare_data.borrow_for_layout() }
+        }
+    );
+);
+
+#[macro_export]
+macro_rules! optional_root_object_to_js_or_null {
+    ($cx: expr, $binding:expr) => {{
+        rooted!(in($cx) let mut rval = NullValue());
+        if let Some(object) = $binding {
+            object.to_jsval($cx, rval.handle_mut());
+        }
+        rval.get()
+    }};
 }

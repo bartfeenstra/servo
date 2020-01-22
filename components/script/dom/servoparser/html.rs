@@ -30,7 +30,7 @@ use servo_url::ServoUrl;
 use std::io;
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[must_root]
+#[unrooted_must_root_lint::must_root]
 pub struct Tokenizer {
     #[ignore_malloc_size_of = "Defined in html5ever"]
     inner: HtmlTokenizer<TreeBuilder<Dom<Node>, Sink>>,
@@ -249,10 +249,11 @@ impl<'a> Serialize for &'a Node {
                         serializer.write_processing_instruction(&pi.target(), &data)?;
                     },
 
-                    NodeTypeId::DocumentFragment => {},
+                    NodeTypeId::DocumentFragment(_) => {},
 
                     NodeTypeId::Document(_) => panic!("Can't serialize Document node itself"),
                     NodeTypeId::Element(_) => panic!("Element shouldn't appear here"),
+                    NodeTypeId::Attr => panic!("Attr shouldn't appear here"),
                 },
             }
         }

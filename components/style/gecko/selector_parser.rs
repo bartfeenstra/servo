@@ -137,6 +137,7 @@ impl NonTSPseudoClass {
             ([$(($css:expr, $name:ident, $gecko_type:tt, $state:tt, $flags:tt),)*]) => {
                 match_ignore_ascii_case! { &name,
                     $($css => Some(NonTSPseudoClass::$name),)*
+                    "-moz-full-screen" => Some(NonTSPseudoClass::Fullscreen),
                     _ => None,
                 }
             }
@@ -169,29 +170,9 @@ impl NonTSPseudoClass {
     }
 
     /// Returns whether the pseudo-class is enabled in content sheets.
+    #[inline]
     fn is_enabled_in_content(&self) -> bool {
-        use crate::gecko_bindings::structs::mozilla;
-        match *self {
-            // For pseudo-classes with pref, the availability in content
-            // depends on the pref.
-            NonTSPseudoClass::Fullscreen => unsafe {
-                mozilla::StaticPrefs_sVarCache_full_screen_api_unprefix_enabled
-            },
-            // Otherwise, a pseudo-class is enabled in content when it
-            // doesn't have any enabled flag.
-            _ => !self
-                .has_any_flag(NonTSPseudoClassFlag::PSEUDO_CLASS_ENABLED_IN_UA_SHEETS_AND_CHROME),
-        }
-    }
-
-    /// <https://drafts.csswg.org/selectors-4/#useraction-pseudos>
-    ///
-    /// We intentionally skip the link-related ones.
-    pub fn is_safe_user_action_state(&self) -> bool {
-        matches!(
-            *self,
-            NonTSPseudoClass::Hover | NonTSPseudoClass::Active | NonTSPseudoClass::Focus
-        )
+        !self.has_any_flag(NonTSPseudoClassFlag::PSEUDO_CLASS_ENABLED_IN_UA_SHEETS_AND_CHROME)
     }
 
     /// Get the state flag associated with a pseudo-class, if any.
@@ -246,6 +227,9 @@ impl NonTSPseudoClass {
                       // across all the elements involved and the latter is already
                       // checked for by our caching precondtions.
                       NonTSPseudoClass::MozIsHTML |
+                      // We prevent style sharing for NAC.
+                      NonTSPseudoClass::MozNativeAnonymous |
+                      NonTSPseudoClass::MozNativeAnonymousNoSpecificity |
                       // :-moz-placeholder is parsed but never matches.
                       NonTSPseudoClass::MozPlaceholder |
                       // :-moz-locale-dir and :-moz-window-inactive depend only on
@@ -279,6 +263,20 @@ impl ::selectors::parser::NonTSPseudoClass for NonTSPseudoClass {
     fn is_active_or_hover(&self) -> bool {
         matches!(*self, NonTSPseudoClass::Active | NonTSPseudoClass::Hover)
     }
+
+    /// We intentionally skip the link-related ones.
+    #[inline]
+    fn is_user_action_state(&self) -> bool {
+        matches!(
+            *self,
+            NonTSPseudoClass::Hover | NonTSPseudoClass::Active | NonTSPseudoClass::Focus
+        )
+    }
+
+    #[inline]
+    fn has_zero_specificity(&self) -> bool {
+        matches!(*self, NonTSPseudoClass::MozNativeAnonymousNoSpecificity)
+    }
 }
 
 /// The dummy struct we use to implement our selector parsing.
@@ -290,6 +288,7 @@ impl ::selectors::SelectorImpl for SelectorImpl {
     type AttrValue = Atom;
     type Identifier = Atom;
     type ClassName = Atom;
+    type PartName = Atom;
     type LocalName = Atom;
     type NamespacePrefix = Atom;
     type NamespaceUrl = Namespace;
@@ -349,12 +348,12 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
 
     #[inline]
     fn parse_host(&self) -> bool {
-        self.parse_slotted()
+        true
     }
 
-    fn pseudo_element_allows_single_colon(name: &str) -> bool {
-        // FIXME: -moz-tree check should probably be ascii-case-insensitive.
-        ::selectors::parser::is_css2_pseudo_element(name) || name.starts_with("-moz-tree-")
+    #[inline]
+    fn parse_part(&self) -> bool {
+        self.chrome_rules_enabled() || static_prefs::pref!("layout.css.shadow-parts.enabled")
     }
 
     fn parse_non_ts_pseudo_class(
@@ -397,7 +396,7 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
                         parser,
                     )?.into()
                 )
-            }
+            },
             _ => return Err(parser.new_custom_error(
                 SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name.clone())
             ))
